@@ -24,6 +24,7 @@ jobs:
         mkdir -p build/etc/systemd/system
         mkdir -p build/etc/sudoers.d
         mkdir -p build/home/pi/pins-scripts
+        mkdir -p build/lib/udev/rules.d
         mkdir -p build/DEBIAN
         
     - name: Copy files
@@ -48,6 +49,9 @@ jobs:
         
         # Sudoers
         cp packaging/sudoers build/etc/sudoers.d/sysupdate-api
+
+        # Udev rules
+        cp packaging/99-asi.rules build/lib/udev/rules.d/99-asi.rules
         
         # Debian control files
         cp packaging/DEBIAN/* build/DEBIAN/

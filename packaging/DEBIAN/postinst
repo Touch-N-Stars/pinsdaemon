@@ -56,6 +56,12 @@ fi
 chown root:root /etc/systemd/system/sysupdate-api.service
 chmod 644 /etc/systemd/system/sysupdate-api.service
 
+# Ensure ASI udev rules file has correct ownership and mode
+if [ -f "/lib/udev/rules.d/99-asi.rules" ]; then
+    chown root:root /lib/udev/rules.d/99-asi.rules
+    chmod 644 /lib/udev/rules.d/99-asi.rules
+fi
+
 # Setup Python virtual environment
 cd /opt/pinsdaemon
 if [ ! -d "venv" ]; then
@@ -76,5 +82,11 @@ chown -R sysupdate-api:sysupdate-api /opt/pinsdaemon/venv
 systemctl daemon-reload
 systemctl enable sysupdate-api
 systemctl restart sysupdate-api
+
+# Reload udev rules after install/upgrade so updated rule file is active
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger --subsystem-match=usb || true
+fi
 
 exit 0
