@@ -54,7 +54,7 @@ class JobManager:
         return job_id
 
     async def _monitor_detached_unit(self, job: Job, unit_name: str):
-        job.add_log(f"Monitoring detached unit: {unit_name}")
+        await job.add_log(f"Monitoring detached unit: {unit_name}")
         
         # Start journalctl to follow logs
         journal_cmd = ["sudo", "journalctl", "-f", "-u", unit_name, "--no-tail"]
@@ -108,46 +108,67 @@ class JobManager:
         
         await log_task
 
-        # Get detailed exit status
-        show_cmd = ["sudo", "systemctl", "show", "-p", "ExecMainStatus,Result", "--value", unit_name]
+        # Get detailed exit status. Transient units can disappear quickly,
+        # so failure to read metadata should not force a failed job result.
+        result = "unknown"
+        show_stdout = b""
+        show_stderr = b""
+        show_cmd = ["sudo", "-n", "systemctl", "show", "-p", "ExecMainStatus,Result", "--value", unit_name]
         try:
             show_proc = await asyncio.create_subprocess_exec(
                 *show_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, _ = await show_proc.communicate()
-        except:
-            stdout = b""
-            
-        # Output like:
-        # 0
-        # success
-        try:
-            lines = stdout.decode().strip().splitlines()
-            exit_code = int(lines[0]) if lines else 0
-            if len(lines) > 1:
-                result = lines[1]
+            show_stdout, show_stderr = await show_proc.communicate()
+            if show_proc.returncode == 0:
+                lines = [line.strip() for line in show_stdout.decode(errors='replace').splitlines() if line.strip()]
+                if lines:
+                    try:
+                        exit_code = int(lines[0])
+                    except ValueError:
+                        exit_code = 0
+                    if len(lines) > 1:
+                        result = lines[1]
             else:
-                result = "unknown"
-        except:
-            exit_code = -1
-            result = "error"
+                await job.add_log(
+                    f"Warning: could not read final unit status for {unit_name}: "
+                    f"{show_stderr.decode(errors='replace').strip() or 'unknown error'}"
+                )
+        except Exception as e:
+            await job.add_log(f"Warning: error while reading final unit status for {unit_name}: {e!r}")
             
         job.exit_code = exit_code
         job.finished_at = time.time()
         
         # Check success conditions:
         # 1. Systemd reports success (clean exit 0)
-        # 2. Or unit disappeared but we saw "System upgrade completed successfully." in logs
-        is_success = (final_status == "inactive" and result == "success" and exit_code == 0)
-        
-        if not is_success and result == "unknown":
-            # Fallback: Check logs for success message
-            log_success = any("System upgrade completed successfully." in log for log in job.logs)
-            if log_success:
-                is_success = True
-                job.exit_code = 0 # Assume success
+        # 2. Unit is inactive with exit code 0 (systemd Result can be flaky for transient units)
+        # 3. Script emitted explicit success markers in logs.
+        is_success = (
+            (final_status == "inactive" and result == "success" and exit_code == 0)
+            or (final_status == "inactive" and exit_code == 0 and result in {"unknown", "", "success", "failed"})
+        )
+
+        log_success = any(
+            "System upgrade completed successfully." in log
+            or "System is already up to date." in log
+            for log in job.logs
+        )
+
+        if not is_success and log_success:
+            is_success = True
+            job.exit_code = 0  # Explicit success marker from script output.
+
+        # Keep status and exit code coherent for clients.
+        if is_success and job.exit_code != 0:
+            job.exit_code = 0
+        if not is_success and job.exit_code == 0:
+            job.exit_code = 1
+
+        await job.add_log(
+            f"Final unit evaluation: is-active={final_status}, result={result}, exit_code={job.exit_code}"
+        )
         
         job.status = JobStatus.SUCCESS if is_success else JobStatus.FAILED
         

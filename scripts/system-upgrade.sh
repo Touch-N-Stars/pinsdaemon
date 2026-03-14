@@ -72,6 +72,12 @@ stdbuf -oL -eL apt-get update
 
 # Upgrade packages
 echo "Running apt upgrade..."
-stdbuf -oL -eL apt-get upgrade -y
+UPGRADE_OUTPUT=$(stdbuf -oL -eL apt-get upgrade -y 2>&1)
+echo "$UPGRADE_OUTPUT"
+
+# Provide a clear signal for clients when no upgrades are available.
+if echo "$UPGRADE_OUTPUT" | grep -qE '^0 upgraded, 0 newly installed, 0 to remove'; then
+    echo "System is already up to date."
+fi
 
 echo "System upgrade completed successfully."
