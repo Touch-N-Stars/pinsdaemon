@@ -154,8 +154,12 @@ while [ $count -lt $MAX_RETRIES ]; do
          CMD+=("password" "$PASSWORD" "name" "$SSID")
     fi
 
-    # Execute connection command
-    echo "Executing: ${CMD[@]}" 
+    # Execute connection command (avoid logging sensitive arguments)
+    if [ -n "$PASSWORD" ]; then
+        echo "Executing: nmcli device wifi connect $SSID password *** name $SSID"
+    else
+        echo "Executing: nmcli device wifi connect $SSID"
+    fi
     "${CMD[@]}" && { CONNECT_SUCCESS=0; break; } || {
         echo "Connection attempt failed. Retrying scan..."
         sudo nmcli device wifi rescan 2>/dev/null || true

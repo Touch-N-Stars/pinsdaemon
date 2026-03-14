@@ -331,6 +331,7 @@ async def connect_wifi(request: WifiConnectRequest):
     This starts a background job to run the connection script.
     """
     cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, request.ssid, request.password or ""]
+    masked_cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, request.ssid, "***" if request.password else ""]
     
     # Translate band to nmcli format if present
     wifi_band = ""
@@ -341,6 +342,7 @@ async def connect_wifi(request: WifiConnectRequest):
         
     if wifi_band:
         cmd.append(wifi_band)
+        masked_cmd.append(wifi_band)
 
     # Note: connect script now handles 3rd argument as BAND
     
@@ -351,7 +353,7 @@ async def connect_wifi(request: WifiConnectRequest):
     # Check if script exists (only nice to have check, the job will fail if not found)
     # But locally on windows it's different path.
     
-    job_id = await job_manager.start_job(cmd)
+    job_id = await job_manager.start_job(cmd, display_command=" ".join(masked_cmd))
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not created")
@@ -362,7 +364,7 @@ async def connect_wifi(request: WifiConnectRequest):
         exitCode=job.exit_code,
         startedAt=job.created_at,
         finishedAt=job.finished_at,
-        command=job.command.replace(request.password or "PASSWORD", "***") if request.password else job.command
+        command=job.command
     )
 
 

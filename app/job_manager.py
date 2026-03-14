@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 import time
+import re
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
@@ -42,10 +43,22 @@ class JobManager:
     def __init__(self):
         self.jobs: Dict[str, Job] = {}
 
-    async def start_job(self, command: List[str], job_id: Optional[str] = None) -> str:
+    @staticmethod
+    def _sanitize_log_line(line: str) -> str:
+        """Redact common credential tokens before storing/streaming logs."""
+        redacted = re.sub(r'(\bpassword\s+)("[^"]*"|\S+)', r'\1***', line, flags=re.IGNORECASE)
+        redacted = re.sub(r'(\bwifi-sec\.psk\s+)("[^"]*"|\S+)', r'\1***', redacted, flags=re.IGNORECASE)
+        return redacted
+
+    async def start_job(
+        self,
+        command: List[str],
+        job_id: Optional[str] = None,
+        display_command: Optional[str] = None,
+    ) -> str:
         if not job_id:
             job_id = str(uuid.uuid4())
-        job = Job(id=job_id, command=" ".join(command))
+        job = Job(id=job_id, command=display_command if display_command is not None else " ".join(command))
         self.jobs[job_id] = job
         
         # Start background task to run the process
@@ -69,7 +82,7 @@ class JobManager:
                 line = await journal_proc.stdout.readline()
                 if not line:
                     break
-                decoded = line.decode(errors='replace').strip()
+                decoded = self._sanitize_log_line(line.decode(errors='replace').strip())
                 if decoded:
                     await job.add_log(decoded)
 
@@ -197,7 +210,7 @@ class JobManager:
                 if not line:
                     break
                 # robust decoding used
-                decoded_line = line.decode(errors='replace').strip()
+                decoded_line = self._sanitize_log_line(line.decode(errors='replace').strip())
                 if decoded_line: 
                     await job.add_log(decoded_line)
                     # Check for detachment
