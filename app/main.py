@@ -4,7 +4,7 @@ import asyncio
 import uuid
 import re
 from datetime import datetime
-from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -39,6 +39,10 @@ if not os.path.exists(DEFAULT_WIFI_SCAN):
 
 WIFI_SCAN_SCRIPT_PATH = os.getenv("WIFI_SCAN_SCRIPT_PATH", DEFAULT_WIFI_SCAN)
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
+FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-firmware.sh")
+FIRMWARE_STATE_FILE = os.getenv("FIRMWARE_STATE_FILE", "/opt/pinsdaemon/firmware.txt")
+FIRMWARE_UPLOAD_DIR = os.getenv("FIRMWARE_UPLOAD_DIR", "/tmp/pinsdaemon-firmware")
+FIRMWARE_ZIP_RE = re.compile(r"^firmware_(\d{8})_(\d{6})\.zip$", re.IGNORECASE)
 
 
 class UpgradeRequest(BaseModel):
@@ -99,6 +103,49 @@ class JobResponse(BaseModel):
     finishedAt: Optional[float]
     command: str
 
+class FirmwareUploadResponse(BaseModel):
+    status: str
+    message: str
+    firmwareTag: str
+    currentFirmwareTag: Optional[str] = None
+    job: Optional[JobResponse] = None
+
+
+def parse_firmware_zip_name(filename: str) -> tuple[str, datetime]:
+    """Parse firmware_DDMMYYYY_HHMMSS.zip into a comparable datetime."""
+    base_name = os.path.basename(filename)
+    match = FIRMWARE_ZIP_RE.match(base_name)
+    if not match:
+        raise ValueError("Filename must match firmware_DDMMYYYY_HHMMSS.zip")
+
+    date_part, time_part = match.group(1), match.group(2)
+    dt = datetime.strptime(f"{date_part}{time_part}", "%d%m%Y%H%M%S")
+    tag = f"firmware_{date_part}_{time_part}"
+    return tag, dt
+
+
+def read_installed_firmware() -> tuple[Optional[str], Optional[datetime]]:
+    if not os.path.exists(FIRMWARE_STATE_FILE):
+        return None, None
+
+    try:
+        with open(FIRMWARE_STATE_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except Exception:
+        return None, None
+
+    match = re.search(r"firmware_(\d{8})_(\d{6})", content, flags=re.IGNORECASE)
+    if not match:
+        return None, None
+
+    date_part, time_part = match.group(1), match.group(2)
+    tag = f"firmware_{date_part}_{time_part}"
+    try:
+        dt = datetime.strptime(f"{date_part}{time_part}", "%d%m%Y%H%M%S")
+    except ValueError:
+        return tag, None
+    return tag, dt
+
 @app.post("/upgrade", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def trigger_upgrade(request: UpgradeRequest):
     """
@@ -127,6 +174,77 @@ async def trigger_upgrade(request: UpgradeRequest):
         startedAt=job.created_at,
         finishedAt=job.finished_at,
         command=job.command
+    )
+
+
+@app.post("/firmware/upload", response_model=FirmwareUploadResponse, dependencies=[Depends(verify_token)])
+async def upload_firmware(file: UploadFile = File(...)):
+    """
+    Uploads a firmware zip, compares version date against installed firmware,
+    and starts async installation of contained .deb packages if newer.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Uploaded file must include a filename")
+
+    try:
+        uploaded_tag, uploaded_dt = parse_firmware_zip_name(file.filename)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    current_tag, current_dt = read_installed_firmware()
+    if current_dt and uploaded_dt <= current_dt:
+        await file.close()
+        return FirmwareUploadResponse(
+            status="up_to_date",
+            message="Firmware is already up to date",
+            firmwareTag=uploaded_tag,
+            currentFirmwareTag=current_tag,
+            job=None,
+        )
+
+    os.makedirs(FIRMWARE_UPLOAD_DIR, exist_ok=True)
+    target_name = f"{uuid.uuid4()}_{os.path.basename(file.filename)}"
+    uploaded_path = os.path.join(FIRMWARE_UPLOAD_DIR, target_name)
+
+    try:
+        with open(uploaded_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save uploaded firmware: {e}")
+    finally:
+        await file.close()
+
+    cmd = [
+        "sudo",
+        "-n",
+        FIRMWARE_INSTALL_SCRIPT_PATH,
+        uploaded_path,
+        uploaded_tag,
+        FIRMWARE_STATE_FILE,
+    ]
+
+    job_id = await job_manager.start_job(cmd)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Failed to create firmware installation job")
+
+    return FirmwareUploadResponse(
+        status="started",
+        message="Firmware upload complete. Installation started.",
+        firmwareTag=uploaded_tag,
+        currentFirmwareTag=current_tag,
+        job=JobResponse(
+            jobId=job.id,
+            status=job.status,
+            exitCode=job.exit_code,
+            startedAt=job.created_at,
+            finishedAt=job.finished_at,
+            command=job.command,
+        ),
     )
 
 

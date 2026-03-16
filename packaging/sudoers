@@ -1,4 +1,5 @@
 sysupdate-api ALL=(root) NOPASSWD: /usr/local/bin/system-upgrade.sh
+sysupdate-api ALL=(root) NOPASSWD: /usr/local/bin/install-firmware.sh *
 sysupdate-api ALL=(root) NOPASSWD: /usr/local/bin/manage-samba.sh
 sysupdate-api ALL=(root) NOPASSWD: /sbin/iwlist
 sysupdate-api ALL=(root) NOPASSWD: /usr/sbin/iwlist

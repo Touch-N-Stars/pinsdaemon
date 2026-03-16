@@ -4,7 +4,7 @@ Section: utils
 Priority: optional
 Architecture: arm64
 Maintainer: Aco <aco@example.com>
-Depends: python3, python3-venv, sudo, bash, network-manager, wireless-tools
+Depends: python3, python3-venv, sudo, bash, network-manager, wireless-tools, unzip
 Description: System Upgrade API Daemon
  Exposes a secure HTTP endpoint to trigger system updates and stream logs.
  Runs as a dedicated restricted user.

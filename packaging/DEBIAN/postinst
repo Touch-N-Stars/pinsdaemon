@@ -19,6 +19,11 @@ if [ -f "/usr/local/bin/system-upgrade.sh" ]; then
     chmod 755 /usr/local/bin/system-upgrade.sh
 fi
 
+if [ -f "/usr/local/bin/install-firmware.sh" ]; then
+    chown root:root /usr/local/bin/install-firmware.sh
+    chmod 755 /usr/local/bin/install-firmware.sh
+fi
+
 if [ -f "/usr/local/bin/wifi-connect.sh" ]; then
     chmod 755 /usr/local/bin/wifi-connect.sh
 fi
