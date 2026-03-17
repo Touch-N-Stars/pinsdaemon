@@ -1,9 +1,24 @@
 #!/bin/sh
 set -e
 
-# Stop service
+# Stop API service
 systemctl stop sysupdate-api || true
 systemctl disable sysupdate-api || true
+
+# During upgrade/removal, stop PINS service first if it is running.
+if systemctl is-active --quiet pins.service; then
+	systemctl stop pins.service || true
+else
+	systemctl stop pins || true
+fi
+
+# Stop gvfs gphoto2 monitor service if present.
+# Try system scope first, then attempt the pi user session service.
+systemctl stop gvfs-gphoto2-volume-monitor.service || true
+if id "pi" >/dev/null 2>&1; then
+	PI_UID=$(id -u pi)
+	su - pi -c "XDG_RUNTIME_DIR=/run/user/${PI_UID} systemctl --user stop gvfs-gphoto2-volume-monitor.service" || true
+fi
 
 # Remove logs or temp files if needed
 # rm -rf /opt/pinsdaemon/venv

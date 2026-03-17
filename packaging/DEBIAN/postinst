@@ -88,6 +88,13 @@ systemctl daemon-reload
 systemctl enable sysupdate-api
 systemctl restart sysupdate-api
 
+# After update/install, bring PINS service back up.
+if systemctl list-unit-files pins.service >/dev/null 2>&1; then
+    systemctl start pins.service || true
+else
+    systemctl start pins || true
+fi
+
 # Reload udev rules after install/upgrade so updated rule file is active
 if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules || true
