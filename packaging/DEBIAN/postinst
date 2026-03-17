@@ -88,6 +88,15 @@ systemctl daemon-reload
 systemctl enable sysupdate-api
 systemctl restart sysupdate-api
 
+# Prevent gvfs camera monitor from being auto-started by user sessions.
+# Apply a global user-unit mask and best-effort stop/mask for pi's current session.
+systemctl --global mask gvfs-gphoto2-volume-monitor.service || true
+if id "pi" >/dev/null 2>&1; then
+    PI_UID=$(id -u pi)
+    su - pi -c "XDG_RUNTIME_DIR=/run/user/${PI_UID} systemctl --user stop gvfs-gphoto2-volume-monitor.service" || true
+    su - pi -c "XDG_RUNTIME_DIR=/run/user/${PI_UID} systemctl --user mask gvfs-gphoto2-volume-monitor.service" || true
+fi
+
 # After update/install, bring PINS service back up.
 if systemctl list-unit-files pins.service >/dev/null 2>&1; then
     systemctl start pins.service || true
