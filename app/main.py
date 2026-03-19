@@ -98,6 +98,35 @@ class HotspotPasswordUpdateResponse(BaseModel):
     status: str
     message: str
     configured: bool
+    appliedToActiveHotspot: bool
+
+
+async def is_hotspot_active_on_wlan0() -> bool:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return False
+
+        for line in stdout.decode(errors="replace").splitlines():
+            parts = line.split(":")
+            if len(parts) < 3:
+                continue
+
+            name, conn_type, device = parts[0], parts[1], parts[2]
+            if conn_type != "802-11-wireless" or device != "wlan0":
+                continue
+
+            if name in {"Hotspot", "hotspot-ap"} or name.startswith("pins-"):
+                return True
+    except Exception:
+        return False
+
+    return False
 
 class SystemTimeRequest(BaseModel):
     timestamp: float
@@ -517,10 +546,29 @@ async def set_hotspot_password(request: HotspotPasswordRequest):
         raise HTTPException(status_code=400, detail="Hotspot password must be between 8 and 63 characters")
 
     save_hotspot_password(password)
+
+    applied_now = False
+    if await is_hotspot_active_on_wlan0():
+        cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, "--hotspot"]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            error_text = stderr.decode(errors="replace").strip() or "unknown error"
+            raise HTTPException(
+                status_code=500,
+                detail=f"Password saved, but failed to apply to active hotspot: {error_text}",
+            )
+        applied_now = True
+
     return HotspotPasswordUpdateResponse(
         status="success",
-        message="Hotspot default password updated",
+        message="Hotspot default password updated and applied" if applied_now else "Hotspot default password updated",
         configured=True,
+        appliedToActiveHotspot=applied_now,
     )
 
 

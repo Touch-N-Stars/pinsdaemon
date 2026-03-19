@@ -238,7 +238,8 @@ Update the default hotspot password used by hotspot mode.
   {
     "status": "success",
     "message": "Hotspot default password updated",
-    "configured": true
+    "configured": true,
+    "appliedToActiveHotspot": false
   }
   ```
 - **Validation**: password must be 8-63 characters.

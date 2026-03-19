@@ -46,6 +46,16 @@ PY
 
 enable_hotspot() {
     echo "Connection failed (or forcing hotspot). Re-enabling hotspot..."
+
+    # Remove legacy hotspot profiles so nmcli creates a fresh AP with current password.
+    existing_hotspots=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep -E "^(Hotspot|hotspot-ap):802-11-wireless" | cut -d: -f1)
+    if [ -n "$existing_hotspots" ]; then
+        while IFS= read -r conn; do
+            if [ -n "$conn" ]; then
+                nmcli connection delete "$conn" >/dev/null 2>&1 || true
+            fi
+        done <<< "$existing_hotspots"
+    fi
     
     # Get CPU ID for unique SSID
     CPU_ID="0000"
