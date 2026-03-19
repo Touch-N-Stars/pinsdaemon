@@ -12,6 +12,7 @@ from typing import Optional, List
 from .auth import verify_token
 from .job_manager import job_manager, JobStatus
 from .wifi_config import load_wifi_config, save_wifi_config
+from .hotspot_config import load_hotspot_config, save_hotspot_password
 
 app = FastAPI(title="System Update Daemon")
 
@@ -85,6 +86,18 @@ class WifiStatusResponse(BaseModel):
     connected: bool
     ssid: Optional[str] = None
     band: Optional[str] = None # "2.4GHz" or "5GHz"
+
+class HotspotPasswordRequest(BaseModel):
+    password: str
+
+class HotspotPasswordStatusResponse(BaseModel):
+    configured: bool
+    source: str
+
+class HotspotPasswordUpdateResponse(BaseModel):
+    status: str
+    message: str
+    configured: bool
 
 class SystemTimeRequest(BaseModel):
     timestamp: float
@@ -489,6 +502,26 @@ async def connect_wifi(request: WifiConnectRequest):
 @app.get("/wifi/auto-connect", dependencies=[Depends(verify_token)])
 async def get_wifi_auto_connect():
     return load_wifi_config()
+
+
+@app.get("/wifi/hotspot/password", response_model=HotspotPasswordStatusResponse, dependencies=[Depends(verify_token)])
+async def get_hotspot_password():
+    config = load_hotspot_config()
+    return HotspotPasswordStatusResponse(configured=(config["source"] == "configured"), source=config["source"])
+
+
+@app.post("/wifi/hotspot/password", response_model=HotspotPasswordUpdateResponse, dependencies=[Depends(verify_token)])
+async def set_hotspot_password(request: HotspotPasswordRequest):
+    password = request.password.strip()
+    if len(password) < 8 or len(password) > 63:
+        raise HTTPException(status_code=400, detail="Hotspot password must be between 8 and 63 characters")
+
+    save_hotspot_password(password)
+    return HotspotPasswordUpdateResponse(
+        status="success",
+        message="Hotspot default password updated",
+        configured=True,
+    )
 
 
 @app.post("/wifi/auto-connect", dependencies=[Depends(verify_token)])

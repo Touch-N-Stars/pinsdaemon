@@ -3,11 +3,46 @@
 SSID="$1"
 PASSWORD="$2"
 BAND="$3" # "a" for 5GHz, "bg" for 2.4GHz
+HOTSPOT_CONFIG_FILE="${HOTSPOT_CONFIG_FILE:-/opt/pinsdaemon/app/hotspot_config.json}"
+DEFAULT_HOTSPOT_PASSWORD="touchnstars"
 
 # Support for explicit hotspot mode
 if [ "$1" == "--hotspot" ]; then
     FORCE_HOTSPOT=true
 fi
+
+get_hotspot_password() {
+    local hotspot_password="$DEFAULT_HOTSPOT_PASSWORD"
+
+    if [ -f "$HOTSPOT_CONFIG_FILE" ] && command -v python3 >/dev/null 2>&1; then
+        local configured_password
+        configured_password=$(python3 - "$HOTSPOT_CONFIG_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    password = data.get("password", "")
+    if isinstance(password, str):
+        password = password.strip()
+    else:
+        password = ""
+    if 8 <= len(password) <= 63:
+        print(password)
+except Exception:
+    pass
+PY
+)
+
+        if [ -n "$configured_password" ]; then
+            hotspot_password="$configured_password"
+        fi
+    fi
+
+    printf "%s" "$hotspot_password"
+}
 
 enable_hotspot() {
     echo "Connection failed (or forcing hotspot). Re-enabling hotspot..."
@@ -25,7 +60,7 @@ enable_hotspot() {
     fi
 
     HOTSPOT_SSID="pins-$CPU_ID"
-    HOTSPOT_PASSWORD="touchnstars"
+    HOTSPOT_PASSWORD="$(get_hotspot_password)"
 
     echo "Creating hotspot: $HOTSPOT_SSID"
 

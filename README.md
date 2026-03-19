@@ -211,7 +211,39 @@ Return whether device is connected to Wi-Fi and detect active band.
   }
   ```
 
-### 9. System Temperature
+### 9. Hotspot Password
+
+Get hotspot password configuration status without exposing the password value.
+
+- **URL**: `GET /wifi/hotspot/password`
+- **Response**:
+  ```json
+  {
+    "configured": false,
+    "source": "default"
+  }
+  ```
+
+Update the default hotspot password used by hotspot mode.
+
+- **URL**: `POST /wifi/hotspot/password`
+- **Body**:
+  ```json
+  {
+    "password": "newstrongpass"
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "status": "success",
+    "message": "Hotspot default password updated",
+    "configured": true
+  }
+  ```
+- **Validation**: password must be 8-63 characters.
+
+### 10. System Temperature
 
 - **URL**: `GET /system/temperature`
 - **Response**:
@@ -223,7 +255,7 @@ Return whether device is connected to Wi-Fi and detect active band.
   }
   ```
 
-### 10. System Time
+### 11. System Time
 
 - **URL**: `GET /system/time`
 - **Response**:
@@ -243,14 +275,14 @@ Return whether device is connected to Wi-Fi and detect active band.
   ```
 - **Response**: `JobResponse` object.
 
-### 11. Job Status
+### 12. Job Status
 
 Check the status of a background job.
 
 - **URL**: `GET /jobs/{jobId}`
 - **Response**: `JobResponse` object.
 
-### 12. Job Logs (WebSocket)
+### 13. Job Logs (WebSocket)
 
 Stream live logs from a running job.
 
