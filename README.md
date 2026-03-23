@@ -175,7 +175,14 @@ Connect to a specific Wi-Fi network. If connection fails, it automatically rever
   ```
 - **Response**: `JobResponse` object.
 
-### 7. Wi-Fi Auto-Connect
+### 7. Wi-Fi Disable (Force Hotspot)
+
+Disable Wi-Fi client mode and force hotspot mode.
+
+- **URL**: `POST /wifi/disable`
+- **Response**: `JobResponse` object.
+
+### 8. Wi-Fi Auto-Connect
 
 - **URL**: `GET /wifi/auto-connect`
 - **Response**:
@@ -197,7 +204,7 @@ Connect to a specific Wi-Fi network. If connection fails, it automatically rever
   }
   ```
 
-### 8. Wi-Fi Status
+### 9. Wi-Fi Status
 
 Return whether device is connected to Wi-Fi and detect active band.
 
@@ -211,7 +218,7 @@ Return whether device is connected to Wi-Fi and detect active band.
   }
   ```
 
-### 9. Hotspot Password
+### 10. Hotspot Password
 
 Get hotspot password configuration status without exposing the password value.
 
@@ -244,7 +251,7 @@ Update the default hotspot password used by hotspot mode.
   ```
 - **Validation**: password must be 8-63 characters.
 
-### 10. System Temperature
+### 11. System Temperature
 
 - **URL**: `GET /system/temperature`
 - **Response**:
@@ -256,7 +263,7 @@ Update the default hotspot password used by hotspot mode.
   }
   ```
 
-### 11. System Time
+### 12. System Time
 
 - **URL**: `GET /system/time`
 - **Response**:
@@ -276,14 +283,14 @@ Update the default hotspot password used by hotspot mode.
   ```
 - **Response**: `JobResponse` object.
 
-### 12. Job Status
+### 13. Job Status
 
 Check the status of a background job.
 
 - **URL**: `GET /jobs/{jobId}`
 - **Response**: `JobResponse` object.
 
-### 13. Job Logs (WebSocket)
+### 14. Job Logs (WebSocket)
 
 Stream live logs from a running job.
 

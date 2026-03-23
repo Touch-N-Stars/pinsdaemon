@@ -528,6 +528,28 @@ async def connect_wifi(request: WifiConnectRequest):
     )
 
 
+@app.post("/wifi/disable", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def disable_wifi_and_enable_hotspot():
+    """
+    Disables Wi-Fi client usage by forcing hotspot mode.
+    """
+    cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, "--hotspot"]
+
+    job_id = await job_manager.start_job(cmd)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not created")
+
+    return JobResponse(
+        jobId=job.id,
+        status=job.status,
+        exitCode=job.exit_code,
+        startedAt=job.created_at,
+        finishedAt=job.finished_at,
+        command=job.command,
+    )
+
+
 @app.get("/wifi/auto-connect", dependencies=[Depends(verify_token)])
 async def get_wifi_auto_connect():
     return load_wifi_config()
