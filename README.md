@@ -283,14 +283,46 @@ Update the default hotspot password used by hotspot mode.
   ```
 - **Response**: `JobResponse` object.
 
-### 13. Job Status
+### 13. Check Updates
+
+Check whether updates are available for a whitelist of relevant packages.
+The daemon reads installed versions locally and compares them against the configured APT Packages index.
+
+- **URL**: `GET /updates/check`
+- **Response**:
+  ```json
+  {
+    "hasUpdates": true,
+    "checkedAt": "2026-03-21T21:40:00Z",
+    "packages": [
+      {
+        "name": "pins",
+        "installedVersion": "3.3.0.1019-nightly+173",
+        "latestVersion": "3.3.0.1020-nightly+174",
+        "updateAvailable": true
+      },
+      {
+        "name": "pinsdaemon",
+        "installedVersion": "1.0.0-173",
+        "latestVersion": "1.0.1-174",
+        "updateAvailable": true
+      }
+    ]
+  }
+  ```
+
+- **Environment variables**:
+  - `UPDATES_PACKAGES_URL` (default: `https://repo.touch-n-stars.eu/reprepro/dists/trixie/main/binary-arm64/Packages`)
+  - `UPDATES_PACKAGE_PATTERNS` (default: `pins,pinsdaemon,pins-plugin-*`)
+
+### 14. Job Status
 
 Check the status of a background job.
 
 - **URL**: `GET /jobs/{jobId}`
 - **Response**: `JobResponse` object.
 
-### 14. Job Logs (WebSocket)
+### 15. Job Logs (WebSocket)
 
 Stream live logs from a running job.
 

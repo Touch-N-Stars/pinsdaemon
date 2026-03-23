@@ -3,6 +3,9 @@ import json
 import asyncio
 import uuid
 import re
+import fnmatch
+import urllib.request
+import urllib.error
 from datetime import datetime
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,6 +47,13 @@ FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/l
 FIRMWARE_STATE_FILE = os.getenv("FIRMWARE_STATE_FILE", "/opt/pinsdaemon/firmware.txt")
 FIRMWARE_UPLOAD_DIR = os.getenv("FIRMWARE_UPLOAD_DIR", "/tmp/pinsdaemon-firmware")
 FIRMWARE_ZIP_RE = re.compile(r"^firmware_(\d{8})_(\d{6})\.zip$", re.IGNORECASE)
+UPDATES_PACKAGES_URL = os.getenv(
+    "UPDATES_PACKAGES_URL",
+    "https://repo.touch-n-stars.eu/reprepro/dists/trixie/main/binary-arm64/Packages",
+)
+UPDATES_PACKAGE_PATTERNS = [
+    p.strip() for p in os.getenv("UPDATES_PACKAGE_PATTERNS", "pins,pinsdaemon,pins-plugin-*").split(",") if p.strip()
+]
 
 
 class UpgradeRequest(BaseModel):
@@ -99,6 +109,19 @@ class HotspotPasswordUpdateResponse(BaseModel):
     message: str
     configured: bool
     appliedToActiveHotspot: bool
+
+
+class UpdatePackageStatus(BaseModel):
+    name: str
+    installedVersion: Optional[str] = None
+    latestVersion: Optional[str] = None
+    updateAvailable: bool
+
+
+class UpdatesCheckResponse(BaseModel):
+    hasUpdates: bool
+    checkedAt: str
+    packages: List[UpdatePackageStatus]
 
 
 async def is_hotspot_active_on_wlan0() -> bool:
@@ -188,6 +211,84 @@ def read_installed_firmware() -> tuple[Optional[str], Optional[datetime]]:
         return tag, None
     return tag, dt
 
+
+def _fetch_packages_index(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "pinsdaemon-update-check/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _parse_packages_versions(packages_text: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    current: dict[str, str] = {}
+
+    def flush_entry(entry: dict[str, str]):
+        name = entry.get("Package")
+        version = entry.get("Version")
+        if name and version:
+            parsed[name] = version
+
+    for raw_line in packages_text.splitlines():
+        line = raw_line.rstrip("\n")
+        if not line.strip():
+            if current:
+                flush_entry(current)
+                current = {}
+            continue
+        if line.startswith((" ", "\t")):
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        current[key.strip()] = value.strip()
+
+    if current:
+        flush_entry(current)
+
+    return parsed
+
+
+async def _debian_version_gt(candidate: str, baseline: str) -> bool:
+    proc = await asyncio.create_subprocess_exec(
+        "dpkg",
+        "--compare-versions",
+        candidate,
+        "gt",
+        baseline,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    return (await proc.wait()) == 0
+
+
+async def _get_installed_package_versions() -> dict[str, str]:
+    proc = await asyncio.create_subprocess_exec(
+        "dpkg-query",
+        "-W",
+        "-f=${Package}\t${Version}\n",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return {}
+
+    versions: dict[str, str] = {}
+    for line in stdout.decode(errors="replace").splitlines():
+        if "\t" not in line:
+            continue
+        name, version = line.split("\t", 1)
+        name = name.strip()
+        version = version.strip()
+        if not name or not version:
+            continue
+        versions[name] = version
+    return versions
+
+
+def _matches_any_pattern(package_name: str, patterns: list[str]) -> bool:
+    return any(fnmatch.fnmatch(package_name, pattern) for pattern in patterns)
+
 @app.post("/upgrade", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def trigger_upgrade(request: UpgradeRequest):
     """
@@ -217,6 +318,55 @@ async def trigger_upgrade(request: UpgradeRequest):
         finishedAt=job.finished_at,
         command=job.command
     )
+
+
+@app.get("/updates/check", response_model=UpdatesCheckResponse, dependencies=[Depends(verify_token)])
+async def check_updates():
+    try:
+        packages_text = await asyncio.to_thread(_fetch_packages_index, UPDATES_PACKAGES_URL)
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch repo metadata: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch repo metadata: {e}")
+
+    repo_versions_all = _parse_packages_versions(packages_text)
+    repo_versions = {
+        name: version
+        for name, version in repo_versions_all.items()
+        if _matches_any_pattern(name, UPDATES_PACKAGE_PATTERNS)
+    }
+    installed_versions_all = await _get_installed_package_versions()
+    installed_versions = {
+        name: version
+        for name, version in installed_versions_all.items()
+        if _matches_any_pattern(name, UPDATES_PACKAGE_PATTERNS)
+    }
+
+    package_names = sorted(set(repo_versions.keys()) | set(installed_versions.keys()))
+
+    result_packages: list[UpdatePackageStatus] = []
+    has_updates = False
+    for name in package_names:
+        installed_version = installed_versions.get(name)
+        latest_version = repo_versions.get(name)
+        update_available = False
+        if installed_version and latest_version:
+            update_available = await _debian_version_gt(latest_version, installed_version)
+
+        if update_available:
+            has_updates = True
+
+        result_packages.append(
+            UpdatePackageStatus(
+                name=name,
+                installedVersion=installed_version,
+                latestVersion=latest_version,
+                updateAvailable=update_available,
+            )
+        )
+
+    checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return UpdatesCheckResponse(hasUpdates=has_updates, checkedAt=checked_at, packages=result_packages)
 
 
 @app.post("/firmware/upload", response_model=FirmwareUploadResponse, dependencies=[Depends(verify_token)])
