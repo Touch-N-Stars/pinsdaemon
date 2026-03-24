@@ -315,14 +315,60 @@ The daemon reads installed versions locally and compares them against the config
   - `UPDATES_PACKAGES_URL` (default: `https://repo.touch-n-stars.eu/reprepro/dists/trixie/main/binary-arm64/Packages`)
   - `UPDATES_PACKAGE_PATTERNS` (default: `pins,pinsdaemon,pins-plugin-*`)
 
-### 14. Job Status
+### 14. Indi3rdparty Packages
+
+List available packages from the `latest-build` release of:
+`https://github.com/acocalypso/indi3rdparty/releases/tag/latest-build`
+
+- Debug packages are excluded (`dbg`/`dbgsym` variants).
+- Supports filtering to only packages not currently installed.
+
+- **URL**: `GET /packages/indi3rdparty`
+- **Query params**:
+  - `onlyNotInstalled` (optional bool, default `false`)
+  - `q` (optional string filter by package/asset name)
+- **Response**:
+  ```json
+  {
+    "checkedAt": "2026-03-24T20:10:00Z",
+    "onlyNotInstalled": true,
+    "packages": [
+      {
+        "name": "indi-some-driver",
+        "assetName": "indi-some-driver_1.2.3_arm64.deb",
+        "version": "1.2.3",
+        "architecture": "arm64",
+        "downloadUrl": "https://github.com/acocalypso/indi3rdparty/releases/download/latest-build/indi-some-driver_1.2.3_arm64.deb",
+        "installed": false,
+        "installedVersion": null
+      }
+    ]
+  }
+  ```
+
+Install a selected package from the same release.
+
+- **URL**: `POST /packages/indi3rdparty/install`
+- **Body**:
+  ```json
+  {
+    "assetName": "indi-some-driver_1.2.3_arm64.deb"
+  }
+  ```
+- **Response**: `JobResponse` object.
+
+- **Environment variables**:
+  - `INDI_RELEASE_API_URL` (default: `https://api.github.com/repos/acocalypso/indi3rdparty/releases/tags/latest-build`)
+  - `INDI_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-indi-package.sh`)
+
+### 15. Job Status
 
 Check the status of a background job.
 
 - **URL**: `GET /jobs/{jobId}`
 - **Response**: `JobResponse` object.
 
-### 15. Job Logs (WebSocket)
+### 16. Job Logs (WebSocket)
 
 Stream live logs from a running job.
 

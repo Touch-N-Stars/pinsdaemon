@@ -44,9 +44,14 @@ if not os.path.exists(DEFAULT_WIFI_SCAN):
 WIFI_SCAN_SCRIPT_PATH = os.getenv("WIFI_SCAN_SCRIPT_PATH", DEFAULT_WIFI_SCAN)
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
 FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-firmware.sh")
+INDI_INSTALL_SCRIPT_PATH = os.getenv("INDI_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-indi-package.sh")
 FIRMWARE_STATE_FILE = os.getenv("FIRMWARE_STATE_FILE", "/opt/pinsdaemon/firmware.txt")
 FIRMWARE_UPLOAD_DIR = os.getenv("FIRMWARE_UPLOAD_DIR", "/tmp/pinsdaemon-firmware")
 FIRMWARE_ZIP_RE = re.compile(r"^firmware_(\d{8})_(\d{6})\.zip$", re.IGNORECASE)
+INDI_RELEASE_API_URL = os.getenv(
+    "INDI_RELEASE_API_URL",
+    "https://api.github.com/repos/acocalypso/indi3rdparty/releases/tags/latest-build",
+)
 UPDATES_PACKAGES_URL = os.getenv(
     "UPDATES_PACKAGES_URL",
     "https://repo.touch-n-stars.eu/reprepro/dists/trixie/main/binary-arm64/Packages",
@@ -122,6 +127,26 @@ class UpdatesCheckResponse(BaseModel):
     hasUpdates: bool
     checkedAt: str
     packages: List[UpdatePackageStatus]
+
+
+class IndiPackageInfo(BaseModel):
+    name: str
+    assetName: str
+    version: Optional[str] = None
+    architecture: Optional[str] = None
+    downloadUrl: str
+    installed: bool
+    installedVersion: Optional[str] = None
+
+
+class IndiPackagesResponse(BaseModel):
+    checkedAt: str
+    onlyNotInstalled: bool
+    packages: List[IndiPackageInfo]
+
+
+class IndiPackageInstallRequest(BaseModel):
+    assetName: str
 
 
 async def is_hotspot_active_on_wlan0() -> bool:
@@ -218,6 +243,21 @@ def _fetch_packages_index(url: str) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
+def _fetch_indi_release_assets(api_url: str) -> list[dict[str, str]]:
+    req = urllib.request.Request(api_url, headers={"User-Agent": "pinsdaemon-indi-packages/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    assets = payload.get("assets", [])
+    result: list[dict[str, str]] = []
+    for asset in assets:
+        name = asset.get("name")
+        download_url = asset.get("browser_download_url")
+        if isinstance(name, str) and isinstance(download_url, str):
+            result.append({"name": name, "downloadUrl": download_url})
+    return result
+
+
 def _parse_packages_versions(packages_text: str) -> dict[str, str]:
     parsed: dict[str, str] = {}
     current: dict[str, str] = {}
@@ -246,6 +286,29 @@ def _parse_packages_versions(packages_text: str) -> dict[str, str]:
         flush_entry(current)
 
     return parsed
+
+
+def _is_dbg_build_asset(asset_name: str) -> bool:
+    normalized = asset_name.lower()
+    return (
+        "dbgsym" in normalized
+        or "-dbg_" in normalized
+        or "_dbg_" in normalized
+        or normalized.endswith("-dbg.deb")
+        or normalized.endswith("_dbg.deb")
+    )
+
+
+def _parse_deb_asset(asset_name: str) -> tuple[str, Optional[str], Optional[str]]:
+    if not asset_name.endswith(".deb"):
+        raise ValueError("Not a .deb package")
+
+    m = re.match(r"^(?P<name>.+?)_(?P<version>[^_]+)_(?P<arch>[^_]+)\.deb$", asset_name)
+    if m:
+        return m.group("name"), m.group("version"), m.group("arch")
+
+    # Fallback for uncommon names without standard Debian filename layout.
+    return asset_name[:-4], None, None
 
 
 async def _debian_version_gt(candidate: str, baseline: str) -> bool:
@@ -284,6 +347,48 @@ async def _get_installed_package_versions() -> dict[str, str]:
             continue
         versions[name] = version
     return versions
+
+
+async def _build_indi_packages(only_not_installed: bool, name_filter: Optional[str]) -> list[IndiPackageInfo]:
+    assets = await asyncio.to_thread(_fetch_indi_release_assets, INDI_RELEASE_API_URL)
+    installed_versions = await _get_installed_package_versions()
+
+    query = (name_filter or "").strip().lower()
+    result: list[IndiPackageInfo] = []
+
+    for asset in assets:
+        asset_name = asset["name"]
+        download_url = asset["downloadUrl"]
+
+        if not asset_name.endswith(".deb"):
+            continue
+        if _is_dbg_build_asset(asset_name):
+            continue
+
+        package_name, package_version, package_arch = _parse_deb_asset(asset_name)
+        installed_version = installed_versions.get(package_name)
+        installed = installed_version is not None
+
+        if only_not_installed and installed:
+            continue
+
+        if query and query not in package_name.lower() and query not in asset_name.lower():
+            continue
+
+        result.append(
+            IndiPackageInfo(
+                name=package_name,
+                assetName=asset_name,
+                version=package_version,
+                architecture=package_arch,
+                downloadUrl=download_url,
+                installed=installed,
+                installedVersion=installed_version,
+            )
+        )
+
+    result.sort(key=lambda p: (p.name, p.assetName))
+    return result
 
 
 def _matches_any_pattern(package_name: str, patterns: list[str]) -> bool:
@@ -367,6 +472,52 @@ async def check_updates():
 
     checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     return UpdatesCheckResponse(hasUpdates=has_updates, checkedAt=checked_at, packages=result_packages)
+
+
+@app.get("/packages/indi3rdparty", response_model=IndiPackagesResponse, dependencies=[Depends(verify_token)])
+async def list_indi3rdparty_packages(onlyNotInstalled: bool = False, q: Optional[str] = None):
+    try:
+        packages = await _build_indi_packages(only_not_installed=onlyNotInstalled, name_filter=q)
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch release metadata: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build package list: {e}")
+
+    checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return IndiPackagesResponse(checkedAt=checked_at, onlyNotInstalled=onlyNotInstalled, packages=packages)
+
+
+@app.post("/packages/indi3rdparty/install", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def install_indi3rdparty_package(request: IndiPackageInstallRequest):
+    target_asset = request.assetName.strip()
+    if not target_asset:
+        raise HTTPException(status_code=400, detail="assetName is required")
+
+    try:
+        packages = await _build_indi_packages(only_not_installed=False, name_filter=None)
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch release metadata: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build package list: {e}")
+
+    selected = next((p for p in packages if p.assetName == target_asset), None)
+    if not selected:
+        raise HTTPException(status_code=404, detail="Selected package asset not found in latest-build release")
+
+    cmd = ["sudo", "-n", INDI_INSTALL_SCRIPT_PATH, selected.downloadUrl, selected.assetName]
+    job_id = await job_manager.start_job(cmd)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Failed to create install job")
+
+    return JobResponse(
+        jobId=job.id,
+        status=job.status,
+        exitCode=job.exit_code,
+        startedAt=job.created_at,
+        finishedAt=job.finished_at,
+        command=job.command,
+    )
 
 
 @app.post("/firmware/upload", response_model=FirmwareUploadResponse, dependencies=[Depends(verify_token)])

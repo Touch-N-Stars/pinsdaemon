@@ -24,6 +24,11 @@ if [ -f "/usr/local/bin/install-firmware.sh" ]; then
     chmod 755 /usr/local/bin/install-firmware.sh
 fi
 
+if [ -f "/usr/local/bin/install-indi-package.sh" ]; then
+    chown root:root /usr/local/bin/install-indi-package.sh
+    chmod 755 /usr/local/bin/install-indi-package.sh
+fi
+
 if [ -f "/usr/local/bin/wifi-connect.sh" ]; then
     chmod 755 /usr/local/bin/wifi-connect.sh
 fi
