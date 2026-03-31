@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import codecs
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "file_config.json")
 
@@ -13,13 +14,11 @@ CONFIG_FILE = os.path.join(os.path.dirname(__file__), "file_config.json")
 def get_devices():
     devices = []
 
-    # Root immer anbieten
     devices.append({
         "name": "Root",
         "path": "/"
     })
 
-    # Mount points (inkl. USB)
     try:
         with open("/proc/mounts", "r") as f:
             lines = f.readlines()
@@ -29,6 +28,9 @@ def get_devices():
         for line in lines:
             parts = line.split()
             mountpoint = parts[1]
+
+            # Oktal-Escape-Sequenzen dekodieren (\040 ? Leerzeichen, \011 ? Tab, etc.)
+            mountpoint = mountpoint.encode('raw_unicode_escape').decode('unicode_escape')
 
             if mountpoint.startswith("/media") or mountpoint.startswith("/mnt"):
                 if mountpoint not in seen:

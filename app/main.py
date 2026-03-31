@@ -1085,14 +1085,14 @@ async def set_system_time(request: SystemTimeRequest):
     )
 
 
-@app.get("/files/devices", response_model=List[FileDevice], dependencies=[Depends(verify_token)])
+@app.get("/files/devices", response_model=List[FileDevice])
 async def list_devices():
     return get_devices()
 
-@app.get("/files/list", response_model=List[DirectoryEntry], dependencies=[Depends(verify_token)])
+@app.get("/files/list", response_model=List[DirectoryEntry])
 async def api_list_directories(path: str):
     return list_directories(path)
 
-@app.post("/files/create-dir", response_model=DirectoryEntry, dependencies=[Depends(verify_token)])
+@app.post("/files/create-dir", response_model=DirectoryEntry)
 async def api_create_directory(request: CreateDirectoryRequest):
     return create_directory(request.path, request.name)
