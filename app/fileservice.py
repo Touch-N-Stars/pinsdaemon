@@ -29,7 +29,6 @@ def get_devices():
             parts = line.split()
             mountpoint = parts[1]
 
-            # Oktal-Escape-Sequenzen dekodieren (\040 ? Leerzeichen, \011 ? Tab, etc.)
             mountpoint = mountpoint.encode('raw_unicode_escape').decode('unicode_escape')
 
             if mountpoint.startswith("/media") or mountpoint.startswith("/mnt"):
@@ -65,8 +64,7 @@ def list_directories(path: str):
                     "name": entry,
                     "path": full_path
                 })
-
-        # optional: sortieren (nice UX)
+                
         entries.sort(key=lambda x: x["name"].lower())
 
         return entries

@@ -26,11 +26,7 @@ sysupdate-api ALL=(root) NOPASSWD: /usr/bin/systemctl is-active pins-sysupgrade-
 sysupdate-api ALL=(root) NOPASSWD: /bin/systemctl is-active pins-sysupgrade-*
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/systemctl show -p ExecMainStatus\,Result --value pins-sysupgrade-*
 sysupdate-api ALL=(root) NOPASSWD: /bin/systemctl show -p ExecMainStatus\,Result --value pins-sysupgrade-*
-
-# USB-Laufwerke lesen
 sysupdate-api ALL=(root) NOPASSWD: /bin/ls /media/*
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/find /media -type d
-
-# Ordner anlegen (nur unter /media und /home)
 sysupdate-api ALL=(root) NOPASSWD: /bin/mkdir -p /media/*
 sysupdate-api ALL=(root) NOPASSWD: /bin/mkdir -p /home/*
