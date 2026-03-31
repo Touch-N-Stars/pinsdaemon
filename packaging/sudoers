@@ -30,3 +30,7 @@ sysupdate-api ALL=(root) NOPASSWD: /bin/ls /media/*
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/find /media -type d
 sysupdate-api ALL=(root) NOPASSWD: /bin/mkdir -p /media/*
 sysupdate-api ALL=(root) NOPASSWD: /bin/mkdir -p /home/*
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/NetworkManager/dnsmasq-wlan0.leases
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/NetworkManager/dnsmasq-wlan1.leases
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/misc/dnsmasq.leases
+

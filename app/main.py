@@ -1096,3 +1096,69 @@ async def api_list_directories(path: str):
 @app.post("/files/create-dir", response_model=DirectoryEntry)
 async def api_create_directory(request: CreateDirectoryRequest):
     return create_directory(request.path, request.name)
+class DhcpClient(BaseModel):
+    ip: str
+    mac: str
+    hostname: Optional[str] = None
+    expires: Optional[str] = None
+
+
+class DhcpClientsResponse(BaseModel):
+    clients: List[DhcpClient]
+
+
+_DNSMASQ_LEASES_CANDIDATES = [
+    "/var/lib/NetworkManager/dnsmasq-wlan0.leases",
+    "/var/lib/NetworkManager/dnsmasq-wlan1.leases",
+    "/var/lib/misc/dnsmasq.leases",
+]
+DNSMASQ_LEASES_FILE = os.getenv("DNSMASQ_LEASES_FILE", "")
+
+
+def _leases_candidates() -> list[str]:
+    if DNSMASQ_LEASES_FILE:
+        return [DNSMASQ_LEASES_FILE]
+    return list(_DNSMASQ_LEASES_CANDIDATES)
+
+
+def _parse_leases_text(text: str) -> list[DhcpClient]:
+    clients: list[DhcpClient] = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 4:
+            continue
+        expiry_epoch, mac, ip = parts[0], parts[1], parts[2]
+        hostname = parts[3] if parts[3] != "*" else None
+        try:
+            expires = datetime.fromtimestamp(int(expiry_epoch)).strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, OSError):
+            expires = None
+        clients.append(DhcpClient(ip=ip, mac=mac, hostname=hostname, expires=expires))
+    return clients
+
+
+@app.get("/wifi/clients", response_model=DhcpClientsResponse, dependencies=[Depends(verify_token)])
+async def get_dhcp_clients():
+    """/var/lib/NetworkManager/ is mode 700 so direct open() fails for non-root.
+    Use 'sudo -n cat' for each candidate; the first that succeeds wins.
+    Required sudoers rule (add to /etc/sudoers.d/pinsdaemon on the Pi):
+      sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/NetworkManager/dnsmasq-wlan0.leases
+    """
+    errors: list[str] = []
+    for leases_path in _leases_candidates():
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "cat", leases_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            reason = stderr.decode(errors="replace").strip() or f"exit code {proc.returncode}"
+            errors.append(f"{leases_path}: {reason}")
+            continue
+        return DhcpClientsResponse(clients=_parse_leases_text(stdout.decode(errors="replace")))
+
+    if errors:
+        raise HTTPException(status_code=500, detail="Could not read any DHCP lease file: " + "; ".join(errors))
+    return DhcpClientsResponse(clients=[])
+
