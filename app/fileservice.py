@@ -52,18 +52,39 @@ def list_directories(path: str):
 
     try:
         entries = []
-
         for entry in os.listdir(path):
             full_path = os.path.join(path, entry)
-
             if os.path.isdir(full_path):
-                entries.append({
-                    "name": entry,
-                    "path": full_path
-                })
-                
-        entries.sort(key=lambda x: x["name"].lower())
+                entries.append({"name": entry, "path": full_path})
 
+        entries.sort(key=lambda x: x["name"].lower())
+        return entries
+
+    except PermissionError:
+        abs_path = os.path.abspath(path)
+        if not abs_path.startswith("/media"):
+            return []
+
+        # Fallback for restricted mount permissions: use fixed sudo find allowlisted in sudoers.
+        proc = subprocess.run(
+            ["sudo", "-n", "/usr/bin/find", "/media", "-type", "d"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return []
+
+        normalized_parent = abs_path.rstrip("/")
+        entries = []
+        for raw in proc.stdout.splitlines():
+            candidate = raw.strip().rstrip("/")
+            if not candidate or candidate == normalized_parent:
+                continue
+            if os.path.dirname(candidate) == normalized_parent:
+                entries.append({"name": os.path.basename(candidate), "path": candidate})
+
+        entries.sort(key=lambda x: x["name"].lower())
         return entries
 
     except Exception:
@@ -86,8 +107,10 @@ def create_directory(path: str, name: str):
         # Happens when paths are on different drives (Windows dev) or malformed.
         raise ValueError("Invalid directory path")
 
-    if os.path.exists(new_path):
+    if os.path.isdir(new_path):
         raise ValueError("Directory already exists")
+    if os.path.exists(new_path):
+        raise ValueError("A file with this name already exists")
 
     try:
         os.makedirs(new_path)
@@ -103,6 +126,19 @@ def create_directory(path: str, name: str):
             text=True,
         )
         if proc.returncode != 0:
+            # If a competing process created it in the meantime, treat as success.
+            if os.path.isdir(new_path):
+                return {
+                    "name": name,
+                    "path": new_path
+                }
+
+            err = (proc.stderr or proc.stdout or "").strip()
+            if "File exists" in err:
+                if os.path.isfile(new_path):
+                    raise ValueError("A file with this name already exists") from e
+                raise ValueError("Directory already exists") from e
+
             detail = (proc.stderr or proc.stdout or "sudo mkdir failed").strip()
             raise PermissionError(f"Permission denied: {detail}") from e
 
