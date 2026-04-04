@@ -1095,7 +1095,12 @@ async def api_list_directories(path: str):
 
 @app.post("/files/create-dir", response_model=DirectoryEntry)
 async def api_create_directory(request: CreateDirectoryRequest):
-    return create_directory(request.path, request.name)
+    try:
+        return create_directory(request.path, request.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
 class DhcpClient(BaseModel):
     ip: str
     mac: str
