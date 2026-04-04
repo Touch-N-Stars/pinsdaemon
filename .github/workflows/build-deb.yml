@@ -53,7 +53,7 @@ jobs:
         cp packaging/sudoers build/etc/sudoers.d/sysupdate-api
 
         # Udev rules
-        cp packaging/99-asi.rules build/lib/udev/rules.d/99-asi.rules
+        cp packaging/zz-pins.rules build/lib/udev/rules.d/zz-pins.rules
         
         # Debian control files
         cp packaging/DEBIAN/* build/DEBIAN/
