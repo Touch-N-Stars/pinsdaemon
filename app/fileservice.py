@@ -47,21 +47,25 @@ def get_devices():
 # =========================
 
 def list_directories(path: str):
-    if not path or not os.path.exists(path):
+    if not path:
         return []
+
+    abs_path = os.path.abspath(path)
 
     try:
         entries = []
-        for entry in os.listdir(path):
-            full_path = os.path.join(path, entry)
+        for entry in os.listdir(abs_path):
+            full_path = os.path.join(abs_path, entry)
             if os.path.isdir(full_path):
                 entries.append({"name": entry, "path": full_path})
 
         entries.sort(key=lambda x: x["name"].lower())
         return entries
 
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+
     except PermissionError:
-        abs_path = os.path.abspath(path)
         if not abs_path.startswith("/media"):
             return []
 
