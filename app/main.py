@@ -17,12 +17,6 @@ from .job_manager import job_manager, JobStatus
 from .wifi_config import load_wifi_config, save_wifi_config
 from .hotspot_config import load_hotspot_config, save_hotspot_password
 
-from .fileservice import (
-    get_devices,
-    list_directories,
-    create_directory
-)
-
 app = FastAPI(title="System Update Daemon")
 
 app.add_middleware(
@@ -65,19 +59,6 @@ UPDATES_PACKAGES_URL = os.getenv(
 UPDATES_PACKAGE_PATTERNS = [
     p.strip() for p in os.getenv("UPDATES_PACKAGE_PATTERNS", "pins,pinsdaemon,pins-plugin-*").split(",") if p.strip()
 ]
-
-class FileDevice(BaseModel):
-    name: str
-    path: str
-
-class DirectoryEntry(BaseModel):
-    name: str
-    path: str
-
-
-class CreateDirectoryRequest(BaseModel):
-    path: str
-    name: str
 
 class UpgradeRequest(BaseModel):
     dryRun: bool = False
@@ -1085,22 +1066,6 @@ async def set_system_time(request: SystemTimeRequest):
     )
 
 
-@app.get("/files/devices", response_model=List[FileDevice], dependencies=[Depends(verify_token)])
-async def list_devices():
-    return get_devices()
-
-@app.get("/files/list", response_model=List[DirectoryEntry], dependencies=[Depends(verify_token)])
-async def api_list_directories(path: str):
-    return list_directories(path)
-
-@app.post("/files/create-dir", response_model=DirectoryEntry, dependencies=[Depends(verify_token)])
-async def api_create_directory(request: CreateDirectoryRequest):
-    try:
-        return create_directory(request.path, request.name)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e))
 class DhcpClient(BaseModel):
     ip: str
     mac: str
