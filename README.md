@@ -9,6 +9,7 @@ A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expo
 - **Samba Management**: Enable or disable SMB shares for file access.
 - **PHD2 Management**: Check and control `phd2` service state.
 - **Wi-Fi Management**: Scan for available networks, connect securely, configure auto-connect, and inspect current connection status.
+- **Wi-Fi Runtime Recovery**: Retries reconnect when wlan0 drops and falls back to device hotspot after repeated failures.
 - **System Utilities**: Read Pi temperature, read system time, and set system time.
 - **Secure Architecture**:
   - Runs as a restricted user (`sysupdate-api`).
@@ -162,6 +163,11 @@ Get a list of available Wi-Fi networks.
 ### 6. Wi-Fi Connect
 
 Connect to a specific Wi-Fi network. If connection fails, it automatically reverts to Hotspot mode.
+
+Runtime behavior:
+- A NetworkManager dispatcher hook monitors wlan0 disconnect/change events.
+- It retries reconnection to the configured auto-connect SSID (default: 3 attempts, 5s backoff).
+- If retries fail, it enables the device hotspot automatically.
 
 - **URL**: `POST /wifi/connect`
 - **Body**:

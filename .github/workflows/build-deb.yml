@@ -22,6 +22,7 @@ jobs:
         mkdir -p build/opt/pinsdaemon
         mkdir -p build/usr/local/bin
         mkdir -p build/etc/systemd/system
+        mkdir -p build/etc/NetworkManager/dispatcher.d
         mkdir -p build/etc/sudoers.d
         mkdir -p build/home/pi/pins-scripts
         mkdir -p build/lib/udev/rules.d
@@ -42,6 +43,10 @@ jobs:
         cp scripts/wifi-connect.sh build/usr/local/bin/
         cp scripts/wifi-automanage.py build/usr/local/bin/
         cp scripts/wifi-scan.py build/usr/local/bin/
+
+        # NetworkManager runtime recovery hook
+        cp scripts/90-pins-wifi-recovery build/etc/NetworkManager/dispatcher.d/
+        chmod 755 build/etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery
 
         # Hotspot hook script
         cp scripts/hotspot.sh build/home/pi/pins-scripts/

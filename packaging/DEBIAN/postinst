@@ -62,6 +62,11 @@ if [ -f "/usr/local/bin/wifi-scan.py" ]; then
     chmod 755 /usr/local/bin/wifi-scan.py
 fi
 
+if [ -f "/etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery" ]; then
+    chown root:root /etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery
+    chmod 755 /etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery
+fi
+
 # Ensure service file is owned by root
 chown root:root /etc/systemd/system/sysupdate-api.service
 chmod 644 /etc/systemd/system/sysupdate-api.service
