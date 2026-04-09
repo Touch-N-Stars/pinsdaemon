@@ -5,11 +5,15 @@ PASSWORD="$2"
 BAND="$3" # "a" for 5GHz, "bg" for 2.4GHz
 HOTSPOT_CONFIG_FILE="${HOTSPOT_CONFIG_FILE:-/opt/pinsdaemon/app/hotspot_config.json}"
 DEFAULT_HOTSPOT_PASSWORD="touchnstars"
+MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
 
 # Support for explicit hotspot mode
 if [ "$1" == "--hotspot" ]; then
     FORCE_HOTSPOT=true
 fi
+
+touch "$MANUAL_CONNECT_LOCK_FILE" 2>/dev/null || true
+trap 'rm -f "$MANUAL_CONNECT_LOCK_FILE"' EXIT
 
 get_hotspot_password() {
     local hotspot_password="$DEFAULT_HOTSPOT_PASSWORD"
@@ -77,9 +81,23 @@ enable_hotspot() {
 
     echo "Creating hotspot: $HOTSPOT_SSID"
 
-    # Create new hotspot with dynamic SSID
+    # Create new hotspot with dynamic SSID.
+    # NetworkManager can return "activation was enqueued" during transient state changes,
+    # so retry briefly before giving up.
+    HOTSPOT_ENABLED=0
+    for attempt in 1 2 3; do
+        if [ "$attempt" -gt 1 ]; then
+            echo "Retrying hotspot activation ($attempt/3)..."
+            sleep 2
+        fi
+        nmcli device disconnect wlan0 >/dev/null 2>&1 || true
+        if nmcli device wifi hotspot ifname wlan0 ssid "$HOTSPOT_SSID" password "$HOTSPOT_PASSWORD"; then
+            HOTSPOT_ENABLED=1
+            break
+        fi
+    done
 
-    if nmcli device wifi hotspot ifname wlan0 ssid "$HOTSPOT_SSID" password "$HOTSPOT_PASSWORD"; then
+    if [ "$HOTSPOT_ENABLED" -eq 1 ]; then
         
         
         # Try finding the connection we just created (active on wlan0)
@@ -101,12 +119,15 @@ enable_hotspot() {
         echo "Hotspot enabled successfully."
     else
         echo "Failed to enable hotspot."
+        return 1
     fi
+
+    return 0
 }
 
 if [ "$FORCE_HOTSPOT" = true ]; then
     enable_hotspot
-    exit 0
+    exit $?
 fi
 
 if [ -z "$SSID" ]; then
@@ -133,7 +154,7 @@ echo "Preparing to connect to $SSID..."
 # 0. Force a rescan to ensure we know the security type
 # We run this in the background/wait briefly or just run it. 
 # Sometimes rescan fails if busy, we ignore error.
-sudo nmcli device wifi rescan 2>/dev/null || true
+nmcli device wifi rescan 2>/dev/null || true
 # Give it a moment to populate
 sleep 3
 
@@ -162,8 +183,8 @@ if [ -n "$PASSWORD" ]; then
     if nmcli connection show "$SSID" >/dev/null 2>&1; then
         echo "Updating existing connection profile for $SSID..."
         nmcli connection modify "$SSID" wifi-sec.psk "$PASSWORD" || true
-        # We also unset the "secrets" flag just in case it was setup differently
-        # nmcli connection modify "$SSID" wifi-sec.key-mgmt wpa-psk || true
+        # Ensure WPA key management is present when using a password.
+        nmcli connection modify "$SSID" wifi-sec.key-mgmt wpa-psk || true
     fi
 fi
 
@@ -210,7 +231,7 @@ while [ $count -lt $MAX_RETRIES ]; do
     fi
     "${CMD[@]}" && { CONNECT_SUCCESS=0; break; } || {
         echo "Connection attempt failed. Retrying scan..."
-        sudo nmcli device wifi rescan 2>/dev/null || true
+        nmcli device wifi rescan 2>/dev/null || true
         # Wait a bit longer for scan results to propagate
         sleep 8
         count=$((count + 1))
@@ -219,7 +240,7 @@ done
 
 if [ $CONNECT_SUCCESS -ne 0 ]; then
    echo "Failed to connect to $SSID after multiple attempts."
-   enable_hotspot
+   enable_hotspot || echo "Hotspot fallback failed."
    exit 1
 fi
 

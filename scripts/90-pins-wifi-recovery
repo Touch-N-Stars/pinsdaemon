@@ -21,6 +21,7 @@ LOCK_DIR="/run/pins-wifi-recovery.lock"
 STATE_FILE="/run/pins-wifi-recovery.failures"
 WIFI_CONFIG_FILE="/opt/pinsdaemon/app/wifi_config.json"
 WIFI_CONNECT_SCRIPT="/usr/local/bin/wifi-connect.sh"
+MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
 LOG_TAG="pins-wifi-recovery"
 
 MAX_RETRIES="${PINS_WIFI_RECOVERY_MAX_RETRIES:-3}"
@@ -34,6 +35,11 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     exit 0
 fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+if [[ -f "$MANUAL_CONNECT_LOCK_FILE" ]]; then
+    # Manual wifi-connect run is in progress; avoid competing NM operations.
+    exit 0
+fi
 
 is_hotspot_active() {
     nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
