@@ -10,7 +10,7 @@ from datetime import datetime
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from .auth import verify_token
 from .job_manager import job_manager, JobStatus
@@ -59,6 +59,7 @@ UPDATES_PACKAGES_URL = os.getenv(
 UPDATES_PACKAGE_PATTERNS = [
     p.strip() for p in os.getenv("UPDATES_PACKAGE_PATTERNS", "pins,pinsdaemon,pins-plugin-*").split(",") if p.strip()
 ]
+UPGRADE_LAST_JOB_FILE = os.getenv("UPGRADE_LAST_JOB_FILE", "/opt/pinsdaemon/last-upgrade-job.json")
 
 class UpgradeRequest(BaseModel):
     dryRun: bool = False
@@ -393,6 +394,66 @@ async def _build_indi_packages(only_not_installed: bool, name_filter: Optional[s
 def _matches_any_pattern(package_name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(package_name, pattern) for pattern in patterns)
 
+
+def _write_last_upgrade_job_state(payload: Dict[str, Any]) -> None:
+    try:
+        state_dir = os.path.dirname(UPGRADE_LAST_JOB_FILE)
+        if state_dir:
+            os.makedirs(state_dir, exist_ok=True)
+
+        temp_path = f"{UPGRADE_LAST_JOB_FILE}.tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+        os.replace(temp_path, UPGRADE_LAST_JOB_FILE)
+    except Exception as e:
+        print(f"Warning: failed to persist latest upgrade job state: {e}")
+
+
+def _read_last_upgrade_job_state() -> Optional[Dict[str, Any]]:
+    if not os.path.exists(UPGRADE_LAST_JOB_FILE):
+        return None
+    try:
+        with open(UPGRADE_LAST_JOB_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _job_response_from_state(data: Optional[Dict[str, Any]]) -> Optional[JobResponse]:
+    if not data:
+        return None
+    try:
+        status = JobStatus(data["status"])
+        exit_code = data.get("exitCode")
+        started_at = float(data["startedAt"])
+        finished_at_raw = data.get("finishedAt")
+        finished_at = float(finished_at_raw) if finished_at_raw is not None else None
+        return JobResponse(
+            jobId=str(data["jobId"]),
+            status=status,
+            exitCode=int(exit_code) if isinstance(exit_code, (int, str)) and str(exit_code).strip() != "" else None,
+            startedAt=started_at,
+            finishedAt=finished_at,
+            command=str(data.get("command", "")),
+        )
+    except Exception:
+        return None
+
+
+def _job_response_from_runtime_job(job) -> JobResponse:
+    return JobResponse(
+        jobId=job.id,
+        status=job.status,
+        exitCode=job.exit_code,
+        startedAt=job.created_at,
+        finishedAt=job.finished_at,
+        command=job.command,
+    )
+
 @app.post("/upgrade", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def trigger_upgrade(request: UpgradeRequest):
     """
@@ -404,7 +465,7 @@ async def trigger_upgrade(request: UpgradeRequest):
     # Construct command
     # Using 'sudo' + script path.
     # Note: verify sudoers is set up correctly.
-    cmd = ["sudo", "-n", SCRIPT_PATH, "--job-id", job_id]
+    cmd = ["sudo", "-n", SCRIPT_PATH, "--job-id", job_id, "--state-file", UPGRADE_LAST_JOB_FILE]
     if request.dryRun:
         # Pass a flag if the script supports it, or just log meant for dry run.
         # Assuming the script takes --dry-run
@@ -413,15 +474,12 @@ async def trigger_upgrade(request: UpgradeRequest):
     # Pass the pre-generated ID so job manager uses it
     await job_manager.start_job(cmd, job_id=job_id)
     job = job_manager.get_job(job_id)
-    
-    return JobResponse(
-        jobId=job.id,
-        status=job.status,
-        exitCode=job.exit_code,
-        startedAt=job.created_at,
-        finishedAt=job.finished_at,
-        command=job.command
-    )
+    if not job:
+        raise HTTPException(status_code=500, detail="Failed to create upgrade job")
+
+    response = _job_response_from_runtime_job(job)
+    _write_last_upgrade_job_state(response.model_dump())
+    return response
 
 
 @app.get("/updates/check", response_model=UpdatesCheckResponse, dependencies=[Depends(verify_token)])
@@ -682,20 +740,36 @@ async def manage_phd2(request: Phd2Request):
     )
 
 
+@app.get("/jobs/latest", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def get_latest_job_status():
+    runtime_job = job_manager.get_latest_job()
+    runtime_response = _job_response_from_runtime_job(runtime_job) if runtime_job else None
+
+    stored_response = _job_response_from_state(_read_last_upgrade_job_state())
+
+    if runtime_response and stored_response:
+        if stored_response.startedAt >= runtime_response.startedAt:
+            return stored_response
+        return runtime_response
+
+    if runtime_response:
+        return runtime_response
+    if stored_response:
+        return stored_response
+
+    raise HTTPException(status_code=404, detail="No jobs found")
+
+
 @app.get("/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def get_job_status(job_id: str):
     job = job_manager.get_job(job_id)
     if not job:
+        stored_response = _job_response_from_state(_read_last_upgrade_job_state())
+        if stored_response and stored_response.jobId == job_id:
+            return stored_response
         raise HTTPException(status_code=404, detail="Job not found")
-    
-    return JobResponse(
-        jobId=job.id,
-        status=job.status,
-        exitCode=job.exit_code,
-        startedAt=job.created_at,
-        finishedAt=job.finished_at,
-        command=job.command
-    )
+
+    return _job_response_from_runtime_job(job)
 
 @app.websocket("/logs/{job_id}")
 async def websocket_logs(websocket: WebSocket, job_id: str):

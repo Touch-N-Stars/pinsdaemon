@@ -250,5 +250,10 @@ class JobManager:
     def get_job(self, job_id: str) -> Optional[Job]:
         return self.jobs.get(job_id)
 
+    def get_latest_job(self) -> Optional[Job]:
+        if not self.jobs:
+            return None
+        return max(self.jobs.values(), key=lambda job: job.created_at)
+
 # Global instance
 job_manager = JobManager()
