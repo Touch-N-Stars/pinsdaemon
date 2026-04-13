@@ -185,4 +185,11 @@ if echo "$UPGRADE_OUTPUT" | grep -qE '^0 upgraded, 0 newly installed, 0 to remov
     echo "System is already up to date."
 fi
 
+echo "Cleaning APT cache..."
+stdbuf -oL -eL apt-get clean
+stdbuf -oL -eL apt-get autoclean
+
+echo "Restarting pins service..."
+systemctl restart pins
+
 echo "System upgrade completed successfully."
