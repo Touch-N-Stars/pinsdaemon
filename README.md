@@ -323,8 +323,8 @@ The daemon reads installed versions locally and compares them against the config
 
 ### 14. Indi3rdparty Packages
 
-List available packages from the `latest-build` release of:
-`https://github.com/acocalypso/indi3rdparty/releases/tag/latest-build`
+List available packages from the latest GitHub release of:
+`https://github.com/acocalypso/indi3rdparty/releases/latest`
 
 - Debug packages are excluded (`dbg`/`dbgsym` variants).
 - Supports filtering to only packages not currently installed.
@@ -344,7 +344,7 @@ List available packages from the `latest-build` release of:
         "assetName": "indi-some-driver_1.2.3_arm64.deb",
         "version": "1.2.3",
         "architecture": "arm64",
-        "downloadUrl": "https://github.com/acocalypso/indi3rdparty/releases/download/latest-build/indi-some-driver_1.2.3_arm64.deb",
+        "downloadUrl": "https://github.com/acocalypso/indi3rdparty/releases/download/indi3rdparty-v2.1.9-14/indi-some-driver_1.2.3_arm64.deb",
         "installed": false,
         "installedVersion": null
       }
@@ -364,7 +364,7 @@ Install a selected package from the same release.
 - **Response**: `JobResponse` object.
 
 - **Environment variables**:
-  - `INDI_RELEASE_API_URL` (default: `https://api.github.com/repos/acocalypso/indi3rdparty/releases/tags/latest-build`)
+  - `INDI_RELEASE_API_URL` (default: `https://api.github.com/repos/acocalypso/indi3rdparty/releases/latest`)
   - `INDI_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-indi-package.sh`)
 
 ### 15. Job Status

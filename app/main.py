@@ -51,7 +51,7 @@ FIRMWARE_UPLOAD_DIR = os.getenv("FIRMWARE_UPLOAD_DIR", "/tmp/pinsdaemon-firmware
 FIRMWARE_ZIP_RE = re.compile(r"^firmware_(\d{8})_(\d{6})\.zip$", re.IGNORECASE)
 INDI_RELEASE_API_URL = os.getenv(
     "INDI_RELEASE_API_URL",
-    "https://api.github.com/repos/acocalypso/indi3rdparty/releases/tags/latest-build",
+    "https://api.github.com/repos/acocalypso/indi3rdparty/releases/latest",
 )
 UPDATES_PACKAGES_URL = os.getenv(
     "UPDATES_PACKAGES_URL",
@@ -728,7 +728,7 @@ async def install_indi3rdparty_package(request: IndiPackageInstallRequest):
 
     selected = next((p for p in packages if p.assetName == target_asset), None)
     if not selected:
-        raise HTTPException(status_code=404, detail="Selected package asset not found in latest-build release")
+        raise HTTPException(status_code=404, detail="Selected package asset not found in latest release")
 
     cmd = ["sudo", "-n", INDI_INSTALL_SCRIPT_PATH, selected.downloadUrl, selected.assetName]
     job_id = await job_manager.start_job(cmd)

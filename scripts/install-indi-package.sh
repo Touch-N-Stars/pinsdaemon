@@ -9,13 +9,19 @@ fi
 DOWNLOAD_URL="$1"
 ASSET_NAME="$2"
 
-if [[ "$DOWNLOAD_URL" != https://github.com/acocalypso/indi3rdparty/releases/download/latest-build/*.deb ]]; then
+if [[ ! "$DOWNLOAD_URL" =~ ^https://github\.com/acocalypso/indi3rdparty/releases/download/[^/]+/[^/]+\.deb$ ]]; then
     echo "Refusing to download from untrusted URL: $DOWNLOAD_URL"
     exit 1
 fi
 
 if [[ "$ASSET_NAME" != *.deb ]]; then
     echo "Only .deb assets are supported"
+    exit 1
+fi
+
+URL_BASENAME="${DOWNLOAD_URL##*/}"
+if [[ "$URL_BASENAME" != "$ASSET_NAME" ]]; then
+    echo "Refusing asset name mismatch between URL and requested asset"
     exit 1
 fi
 
