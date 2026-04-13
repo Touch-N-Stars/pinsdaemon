@@ -1,5 +1,6 @@
 import os
 import json
+import csv
 import asyncio
 import uuid
 import re
@@ -91,6 +92,8 @@ class WifiConnectRequest(BaseModel):
     password: Optional[str] = None
     auto_connect: Optional[bool] = False
     band: Optional[str] = None # "2.4GHz" or "5GHz"
+    client_interface: Optional[str] = None
+    hotspot_interface: Optional[str] = None
 
 class WifiAutoConnectRequest(BaseModel):
     ssid: Optional[str] = None
@@ -101,6 +104,30 @@ class WifiStatusResponse(BaseModel):
     connected: bool
     ssid: Optional[str] = None
     band: Optional[str] = None # "2.4GHz" or "5GHz"
+
+
+class WifiAdapterInfo(BaseModel):
+    interface: str
+    state: str
+    connection: Optional[str] = None
+    role: str
+    mac: Optional[str] = None
+    driver: Optional[str] = None
+    mtu: Optional[int] = None
+
+
+class WifiAdaptersResponse(BaseModel):
+    adapters: List[WifiAdapterInfo]
+
+
+class WifiInterfacesRequest(BaseModel):
+    client_interface: Optional[str] = None
+    hotspot_interface: Optional[str] = None
+
+
+class WifiInterfacesResponse(BaseModel):
+    client_interface: str
+    hotspot_interface: str
 
 class HotspotPasswordRequest(BaseModel):
     password: str
@@ -149,7 +176,149 @@ class IndiPackageInstallRequest(BaseModel):
     assetName: str
 
 
-async def is_hotspot_active_on_wlan0() -> bool:
+_IFACE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _sanitize_interface_name(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if not _IFACE_NAME_RE.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def _validate_interface_name(value: Optional[str], field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if not _IFACE_NAME_RE.fullmatch(candidate):
+        raise HTTPException(status_code=400, detail=f"Invalid {field_name}: '{value}'")
+    return candidate
+
+
+def _get_configured_wifi_interfaces() -> tuple[str, str]:
+    config = load_wifi_config()
+    client_interface = _sanitize_interface_name(config.get("client_interface")) or "wlan0"
+    hotspot_interface = _sanitize_interface_name(config.get("hotspot_interface")) or client_interface
+    return client_interface, hotspot_interface
+
+
+def _parse_nmcli_row(line: str) -> list[str]:
+    reader = csv.reader([line], delimiter=":", escapechar="\\")
+    try:
+        return next(reader)
+    except Exception:
+        return []
+
+
+def _is_hotspot_connection_name(name: str) -> bool:
+    return name in {"Hotspot", "hotspot-ap"} or name.startswith("pins-")
+
+
+async def _read_nmcli_device_details(interface: str) -> tuple[Optional[str], Optional[str], Optional[int]]:
+    proc = await asyncio.create_subprocess_exec(
+        "nmcli",
+        "-g",
+        "GENERAL.HWADDR,GENERAL.DRIVER,GENERAL.MTU",
+        "device",
+        "show",
+        interface,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None, None, None
+
+    rows = [line.strip() for line in stdout.decode(errors="replace").splitlines()]
+    mac = rows[0] if len(rows) > 0 and rows[0] and rows[0] != "--" else None
+    driver = rows[1] if len(rows) > 1 and rows[1] and rows[1] != "--" else None
+
+    mtu: Optional[int] = None
+    if len(rows) > 2 and rows[2] and rows[2] != "--":
+        try:
+            mtu = int(rows[2])
+        except ValueError:
+            mtu = None
+
+    return mac, driver, mtu
+
+
+async def _list_wifi_adapters() -> list[WifiAdapterInfo]:
+    status_proc = await asyncio.create_subprocess_exec(
+        "nmcli",
+        "-t",
+        "-f",
+        "DEVICE,TYPE,STATE,CONNECTION",
+        "device",
+        "status",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    status_stdout, status_stderr = await status_proc.communicate()
+    if status_proc.returncode != 0:
+        error_text = status_stderr.decode(errors="replace").strip() or "nmcli device status failed"
+        raise HTTPException(status_code=500, detail=error_text)
+
+    active_roles: dict[str, str] = {}
+    active_proc = await asyncio.create_subprocess_exec(
+        "nmcli",
+        "-t",
+        "-f",
+        "NAME,TYPE,DEVICE",
+        "connection",
+        "show",
+        "--active",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    active_stdout, _ = await active_proc.communicate()
+    if active_proc.returncode == 0:
+        for raw_line in active_stdout.decode(errors="replace").splitlines():
+            fields = _parse_nmcli_row(raw_line)
+            if len(fields) < 3:
+                continue
+            name, conn_type, device = fields[0], fields[1], fields[2]
+            if conn_type != "802-11-wireless" or not device:
+                continue
+            active_roles[device] = "hotspot" if _is_hotspot_connection_name(name) else "client"
+
+    adapters: list[WifiAdapterInfo] = []
+    for raw_line in status_stdout.decode(errors="replace").splitlines():
+        fields = _parse_nmcli_row(raw_line)
+        if len(fields) < 4:
+            continue
+
+        interface, dev_type, state, connection = fields[0], fields[1], fields[2], fields[3]
+        if dev_type != "wifi" or not interface:
+            continue
+
+        role = active_roles.get(interface, "idle")
+        conn_name = connection if connection and connection != "--" else None
+        mac, driver, mtu = await _read_nmcli_device_details(interface)
+
+        adapters.append(
+            WifiAdapterInfo(
+                interface=interface,
+                state=state,
+                connection=conn_name,
+                role=role,
+                mac=mac,
+                driver=driver,
+                mtu=mtu,
+            )
+        )
+
+    adapters.sort(key=lambda adapter: adapter.interface)
+    return adapters
+
+
+async def is_hotspot_active_on_interface(interface: str) -> bool:
     try:
         proc = await asyncio.create_subprocess_exec(
             "nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
@@ -161,15 +330,15 @@ async def is_hotspot_active_on_wlan0() -> bool:
             return False
 
         for line in stdout.decode(errors="replace").splitlines():
-            parts = line.split(":")
+            parts = _parse_nmcli_row(line)
             if len(parts) < 3:
                 continue
 
             name, conn_type, device = parts[0], parts[1], parts[2]
-            if conn_type != "802-11-wireless" or device != "wlan0":
+            if conn_type != "802-11-wireless" or device != interface:
                 continue
 
-            if name in {"Hotspot", "hotspot-ap"} or name.startswith("pins-"):
+            if _is_hotspot_connection_name(name):
                 return True
     except Exception:
         return False
@@ -819,6 +988,53 @@ async def websocket_logs(websocket: WebSocket, job_id: str):
         except:
             pass
 
+
+@app.get("/wifi/adapters", response_model=WifiAdaptersResponse, dependencies=[Depends(verify_token)])
+async def list_wifi_adapters():
+    adapters = await _list_wifi_adapters()
+    return WifiAdaptersResponse(adapters=adapters)
+
+
+@app.get("/wifi/interfaces", response_model=WifiInterfacesResponse, dependencies=[Depends(verify_token)])
+async def get_wifi_interfaces():
+    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    return WifiInterfacesResponse(client_interface=client_interface, hotspot_interface=hotspot_interface)
+
+
+@app.post("/wifi/interfaces", response_model=WifiInterfacesResponse, dependencies=[Depends(verify_token)])
+async def set_wifi_interfaces(request: WifiInterfacesRequest):
+    client_interface_input = _validate_interface_name(request.client_interface, "client_interface")
+    hotspot_interface_input = _validate_interface_name(request.hotspot_interface, "hotspot_interface")
+
+    current = load_wifi_config()
+    current_client = _sanitize_interface_name(current.get("client_interface")) or "wlan0"
+    current_hotspot = _sanitize_interface_name(current.get("hotspot_interface")) or current_client
+
+    client_interface = client_interface_input if client_interface_input is not None else current_client
+    hotspot_interface = hotspot_interface_input if hotspot_interface_input is not None else current_hotspot
+
+    requested_interfaces = set()
+    if client_interface_input is not None:
+        requested_interfaces.add(client_interface)
+    if hotspot_interface_input is not None:
+        requested_interfaces.add(hotspot_interface)
+
+    if requested_interfaces:
+        available = {adapter.interface for adapter in await _list_wifi_adapters()}
+        missing = sorted(interface for interface in requested_interfaces if interface not in available)
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Unknown Wi-Fi interface(s): {', '.join(missing)}")
+
+    save_wifi_config(
+        current.get("ssid"),
+        bool(current.get("auto_connect", False)),
+        current.get("band"),
+        client_interface=client_interface,
+        hotspot_interface=hotspot_interface,
+    )
+
+    return WifiInterfacesResponse(client_interface=client_interface, hotspot_interface=hotspot_interface)
+
 @app.get("/wifi/scan", response_model=List[WifiNetwork], dependencies=[Depends(verify_token)])
 async def scan_wifi():
     """
@@ -864,8 +1080,35 @@ async def connect_wifi(request: WifiConnectRequest):
     Connects to a WiFi network.
     This starts a background job to run the connection script.
     """
-    cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, request.ssid, request.password or ""]
-    masked_cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, request.ssid, "***" if request.password else ""]
+    request_client_interface = _validate_interface_name(request.client_interface, "client_interface")
+    request_hotspot_interface = _validate_interface_name(request.hotspot_interface, "hotspot_interface")
+
+    configured_client, configured_hotspot = _get_configured_wifi_interfaces()
+    client_interface = request_client_interface or configured_client
+    hotspot_interface = request_hotspot_interface or configured_hotspot
+
+    if request_client_interface or request_hotspot_interface:
+        available = {adapter.interface for adapter in await _list_wifi_adapters()}
+        missing = sorted(
+            iface for iface in {client_interface, hotspot_interface} if iface not in available
+        )
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Unknown Wi-Fi interface(s): {', '.join(missing)}")
+
+    cmd = [
+        "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
+        "--client-iface", client_interface,
+        "--hotspot-iface", hotspot_interface,
+        request.ssid,
+        request.password or "",
+    ]
+    masked_cmd = [
+        "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
+        "--client-iface", client_interface,
+        "--hotspot-iface", hotspot_interface,
+        request.ssid,
+        "***" if request.password else "",
+    ]
     
     # Translate band to nmcli format if present
     wifi_band = ""
@@ -882,7 +1125,13 @@ async def connect_wifi(request: WifiConnectRequest):
     
     # If auto_connect is requested, save the config immediately
     if request.auto_connect:
-        save_wifi_config(request.ssid, True, request.band)
+        save_wifi_config(
+            request.ssid,
+            True,
+            request.band,
+            client_interface=client_interface,
+            hotspot_interface=hotspot_interface,
+        )
     
     # Check if script exists (only nice to have check, the job will fail if not found)
     # But locally on windows it's different path.
@@ -907,7 +1156,13 @@ async def disable_wifi_and_enable_hotspot():
     """
     Disables Wi-Fi client usage by forcing hotspot mode.
     """
-    cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, "--hotspot"]
+    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    cmd = [
+        "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
+        "--hotspot",
+        "--client-iface", client_interface,
+        "--hotspot-iface", hotspot_interface,
+    ]
 
     job_id = await job_manager.start_job(cmd)
     job = job_manager.get_job(job_id)
@@ -944,8 +1199,14 @@ async def set_hotspot_password(request: HotspotPasswordRequest):
     save_hotspot_password(password)
 
     applied_now = False
-    if await is_hotspot_active_on_wlan0():
-        cmd = ["sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, "--hotspot"]
+    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    if await is_hotspot_active_on_interface(hotspot_interface):
+        cmd = [
+            "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
+            "--hotspot",
+            "--client-iface", client_interface,
+            "--hotspot-iface", hotspot_interface,
+        ]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,

@@ -1,15 +1,113 @@
 #!/bin/bash
 
-SSID="$1"
-PASSWORD="$2"
-BAND="$3" # "a" for 5GHz, "bg" for 2.4GHz
 HOTSPOT_CONFIG_FILE="${HOTSPOT_CONFIG_FILE:-/opt/pinsdaemon/app/hotspot_config.json}"
+WIFI_CONFIG_FILE="${WIFI_CONFIG_FILE:-/opt/pinsdaemon/app/wifi_config.json}"
 DEFAULT_HOTSPOT_PASSWORD="touchnstars"
 MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
+DEFAULT_WIFI_INTERFACE="wlan0"
+FORCE_HOTSPOT=false
+CLIENT_IFACE=""
+HOTSPOT_IFACE=""
 
-# Support for explicit hotspot mode
-if [ "$1" == "--hotspot" ]; then
-    FORCE_HOTSPOT=true
+# Parse flags while keeping positional support for backward compatibility.
+POSITIONAL_ARGS=()
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        --hotspot)
+            FORCE_HOTSPOT=true
+            shift
+            ;;
+        --client-iface)
+            CLIENT_IFACE="$2"
+            shift 2
+            ;;
+        --hotspot-iface)
+            HOTSPOT_IFACE="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            while [[ "$#" -gt 0 ]]; do
+                POSITIONAL_ARGS+=("$1")
+                shift
+            done
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+SSID="${POSITIONAL_ARGS[0]:-}"
+PASSWORD="${POSITIONAL_ARGS[1]:-}"
+BAND="${POSITIONAL_ARGS[2]:-}" # "a" for 5GHz, "bg" for 2.4GHz
+
+get_wifi_interface_from_config() {
+    local key="$1"
+
+    if [ -f "$WIFI_CONFIG_FILE" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$WIFI_CONFIG_FILE" "$key" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+key = sys.argv[2]
+valid = re.compile(r"^[A-Za-z0-9._-]+$")
+
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(0)
+
+value = data.get(key)
+if isinstance(value, str):
+    value = value.strip()
+    if valid.fullmatch(value):
+        print(value)
+PY
+    fi
+}
+
+validate_or_fallback_interface() {
+    local requested="$1"
+    local fallback="$2"
+    local label="$3"
+
+    if [ -n "$requested" ] && nmcli device status 2>/dev/null | awk '{print $1}' | grep -qx "$requested"; then
+        printf "%s" "$requested"
+        return
+    fi
+
+    if [ -n "$requested" ]; then
+        echo "Warning: requested $label interface '$requested' not found. Falling back to $fallback"
+    fi
+    printf "%s" "$fallback"
+}
+
+if [ -z "$CLIENT_IFACE" ]; then
+    CLIENT_IFACE="$(get_wifi_interface_from_config "client_interface")"
+fi
+if [ -z "$HOTSPOT_IFACE" ]; then
+    HOTSPOT_IFACE="$(get_wifi_interface_from_config "hotspot_interface")"
+fi
+
+if [ -z "$CLIENT_IFACE" ]; then
+    CLIENT_IFACE="$DEFAULT_WIFI_INTERFACE"
+fi
+if [ -z "$HOTSPOT_IFACE" ]; then
+    HOTSPOT_IFACE="$CLIENT_IFACE"
+fi
+
+CLIENT_IFACE="$(validate_or_fallback_interface "$CLIENT_IFACE" "$DEFAULT_WIFI_INTERFACE" "client")"
+HOTSPOT_IFACE="$(validate_or_fallback_interface "$HOTSPOT_IFACE" "$CLIENT_IFACE" "hotspot")"
+
+echo "Using interfaces: client=$CLIENT_IFACE hotspot=$HOTSPOT_IFACE"
+
+if [ "$FORCE_HOTSPOT" = true ]; then
+    echo "Hotspot mode requested explicitly."
 fi
 
 touch "$MANUAL_CONNECT_LOCK_FILE" 2>/dev/null || true
@@ -52,7 +150,7 @@ enable_hotspot() {
     echo "Connection failed (or forcing hotspot). Re-enabling hotspot..."
 
     # Ensure client mode is dropped before creating AP mode.
-    nmcli device disconnect wlan0 >/dev/null 2>&1 || true
+    nmcli device disconnect "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
 
     # Remove legacy hotspot profiles so nmcli creates a fresh AP with current password.
     existing_hotspots=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep -E "^(Hotspot|hotspot-ap):802-11-wireless" | cut -d: -f1)
@@ -90,8 +188,8 @@ enable_hotspot() {
             echo "Retrying hotspot activation ($attempt/3)..."
             sleep 2
         fi
-        nmcli device disconnect wlan0 >/dev/null 2>&1 || true
-        if nmcli device wifi hotspot ifname wlan0 ssid "$HOTSPOT_SSID" password "$HOTSPOT_PASSWORD"; then
+        nmcli device disconnect "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
+        if nmcli device wifi hotspot ifname "$HOTSPOT_IFACE" ssid "$HOTSPOT_SSID" password "$HOTSPOT_PASSWORD"; then
             HOTSPOT_ENABLED=1
             break
         fi
@@ -100,8 +198,8 @@ enable_hotspot() {
     if [ "$HOTSPOT_ENABLED" -eq 1 ]; then
         
         
-        # Try finding the connection we just created (active on wlan0)
-        NEW_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":wlan0" | cut -d: -f1 | head -n1)
+        # Try finding the connection we just created (active on selected hotspot interface)
+        NEW_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":$HOTSPOT_IFACE" | cut -d: -f1 | head -n1)
         
         if [ -n "$NEW_CONN" ]; then
              echo "Configuring powersave for $NEW_CONN"
@@ -113,7 +211,7 @@ enable_hotspot() {
 
         # Extra safeguard: also disable kernel powersave flag for this device
         if command -v iw >/dev/null 2>&1; then
-            iw dev wlan0 set power_save off || true
+            iw dev "$HOTSPOT_IFACE" set power_save off || true
         fi
         
         echo "Hotspot enabled successfully."
@@ -136,7 +234,7 @@ if [ -z "$SSID" ]; then
 fi
 
 # Check if we are already connected to the target SSID
-ACTIVE_SSID=$(nmcli -t -f NAME,TYPE connection show --active | grep ":802-11-wireless" | cut -d: -f1 | head -n1)
+ACTIVE_SSID=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | grep ":802-11-wireless:$CLIENT_IFACE" | cut -d: -f1 | head -n1)
 
 if [ "$ACTIVE_SSID" == "$SSID" ]; then
     # If band is specified, we check if we need to switch bands
@@ -154,7 +252,7 @@ echo "Preparing to connect to $SSID..."
 # 0. Force a rescan to ensure we know the security type
 # We run this in the background/wait briefly or just run it. 
 # Sometimes rescan fails if busy, we ignore error.
-nmcli device wifi rescan 2>/dev/null || true
+nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
 # Give it a moment to populate
 sleep 3
 
@@ -188,6 +286,10 @@ if [ -n "$PASSWORD" ]; then
     fi
 fi
 
+if nmcli connection show "$SSID" >/dev/null 2>&1; then
+    nmcli connection modify "$SSID" connection.interface-name "$CLIENT_IFACE" || true
+fi
+
 # 3. Connect to the new wifi network
 echo "Connecting to $SSID..."
 
@@ -207,7 +309,7 @@ while [ $count -lt $MAX_RETRIES ]; do
     
     if nmcli connection show "$SSID" >/dev/null 2>&1; then
         echo "Found existing profile for $SSID. Attempting to bring it up..."
-        if nmcli connection up "$SSID"; then
+        if nmcli connection up "$SSID" ifname "$CLIENT_IFACE"; then
             CONNECT_SUCCESS=0
             break
         else
@@ -218,20 +320,20 @@ while [ $count -lt $MAX_RETRIES ]; do
     fi
 
     # Fallback to device connect (creates new profile if missing, or updates existing if arguments provided)
-    CMD=("nmcli" "device" "wifi" "connect" "$SSID")
+        CMD=("nmcli" "device" "wifi" "connect" "$SSID" "ifname" "$CLIENT_IFACE")
     if [ -n "$PASSWORD" ]; then
          CMD+=("password" "$PASSWORD" "name" "$SSID")
     fi
 
     # Execute connection command (avoid logging sensitive arguments)
     if [ -n "$PASSWORD" ]; then
-        echo "Executing: nmcli device wifi connect $SSID password *** name $SSID"
+        echo "Executing: nmcli device wifi connect $SSID ifname $CLIENT_IFACE password *** name $SSID"
     else
-        echo "Executing: nmcli device wifi connect $SSID"
+        echo "Executing: nmcli device wifi connect $SSID ifname $CLIENT_IFACE"
     fi
     "${CMD[@]}" && { CONNECT_SUCCESS=0; break; } || {
         echo "Connection attempt failed. Retrying scan..."
-        nmcli device wifi rescan 2>/dev/null || true
+        nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
         # Wait a bit longer for scan results to propagate
         sleep 8
         count=$((count + 1))
@@ -251,7 +353,7 @@ if [ -n "$BAND" ]; then
     # Use 802-11-wireless.band for better compatibility
     if nmcli connection modify "$SSID" 802-11-wireless.band "$BAND"; then
         echo "Reactivating connection with band preference settings..."
-        nmcli connection up "$SSID" || true
+        nmcli connection up "$SSID" ifname "$CLIENT_IFACE" || true
     else
         echo "Warning: Failed to set wifi band to $BAND"
     fi
@@ -266,7 +368,7 @@ fi
 echo "Successfully connected to $SSID."
 # Optional: Disable powersave on client connection too
 # Filter specifically for wireless connections to avoid configuring ethernet connections
-CURRENT_CONN=$(nmcli -t -f NAME,TYPE connection show --active | grep ":802-11-wireless" | cut -d: -f1 | head -n1)
+CURRENT_CONN=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | grep ":802-11-wireless:$CLIENT_IFACE" | cut -d: -f1 | head -n1)
 if [ -n "$CURRENT_CONN" ]; then
     nmcli connection modify "$CURRENT_CONN" 802-11-wireless.powersave 2 || true
 fi
