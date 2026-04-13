@@ -180,8 +180,11 @@ echo "Running apt upgrade..."
 UPGRADE_OUTPUT=$(stdbuf -oL -eL apt-get upgrade -y 2>&1)
 echo "$UPGRADE_OUTPUT"
 
+HAS_PACKAGE_UPDATES=true
+
 # Provide a clear signal for clients when no upgrades are available.
 if echo "$UPGRADE_OUTPUT" | grep -qE '^0 upgraded, 0 newly installed, 0 to remove'; then
+    HAS_PACKAGE_UPDATES=false
     echo "System is already up to date."
 fi
 
@@ -189,7 +192,11 @@ echo "Cleaning APT cache..."
 stdbuf -oL -eL apt-get clean
 stdbuf -oL -eL apt-get autoclean
 
-echo "Restarting pins service..."
-systemctl restart pins
+if [[ "$HAS_PACKAGE_UPDATES" == "true" ]]; then
+    echo "Updates detected. Restarting pins service..."
+    systemctl restart pins
+else
+    echo "No package updates detected. Skipping pins restart."
+fi
 
 echo "System upgrade completed successfully."
