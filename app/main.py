@@ -46,6 +46,11 @@ WIFI_SCAN_SCRIPT_PATH = os.getenv("WIFI_SCAN_SCRIPT_PATH", DEFAULT_WIFI_SCAN)
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
 FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-firmware.sh")
 INDI_INSTALL_SCRIPT_PATH = os.getenv("INDI_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-indi-package.sh")
+DEFAULT_REQUIRED_PACKAGES_SCRIPT = "/usr/local/bin/ensure-required-packages.sh"
+if not os.path.exists(DEFAULT_REQUIRED_PACKAGES_SCRIPT):
+    DEFAULT_REQUIRED_PACKAGES_SCRIPT = os.path.join(os.path.dirname(__file__), "../scripts/ensure-required-packages.sh")
+REQUIRED_PACKAGES_SCRIPT_PATH = os.getenv("REQUIRED_PACKAGES_SCRIPT_PATH", DEFAULT_REQUIRED_PACKAGES_SCRIPT)
+STARTUP_PACKAGE_CHECK_ENABLED = os.getenv("STARTUP_PACKAGE_CHECK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 FIRMWARE_STATE_FILE = os.getenv("FIRMWARE_STATE_FILE", "/opt/pinsdaemon/firmware.txt")
 FIRMWARE_UPLOAD_DIR = os.getenv("FIRMWARE_UPLOAD_DIR", "/tmp/pinsdaemon-firmware")
 FIRMWARE_ZIP_RE = re.compile(r"^firmware_(\d{8})_(\d{6})\.zip$", re.IGNORECASE)
@@ -622,6 +627,45 @@ def _job_response_from_runtime_job(job) -> JobResponse:
         finishedAt=job.finished_at,
         command=job.command,
     )
+
+
+async def _ensure_required_packages_on_startup() -> None:
+    if not STARTUP_PACKAGE_CHECK_ENABLED:
+        print("Startup required package check is disabled.")
+        return
+
+    if not os.path.exists(REQUIRED_PACKAGES_SCRIPT_PATH):
+        print(f"Required packages script not found at {REQUIRED_PACKAGES_SCRIPT_PATH}; skipping startup package check.")
+        return
+
+    print(f"Starting required package check using {REQUIRED_PACKAGES_SCRIPT_PATH}")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", REQUIRED_PACKAGES_SCRIPT_PATH,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            decoded_line = line.decode(errors="replace").rstrip()
+            if decoded_line:
+                print(f"[startup-package-check] {decoded_line}")
+
+        return_code = await proc.wait()
+        if return_code == 0:
+            print("Startup required package check finished successfully.")
+        else:
+            print(f"Startup required package check failed with exit code {return_code}.")
+    except Exception as e:
+        print(f"Startup required package check failed to execute: {e}")
+
+
+@app.on_event("startup")
+async def schedule_startup_tasks() -> None:
+    asyncio.create_task(_ensure_required_packages_on_startup())
 
 @app.post("/upgrade", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def trigger_upgrade(request: UpgradeRequest):

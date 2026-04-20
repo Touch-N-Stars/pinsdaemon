@@ -39,6 +39,7 @@ jobs:
         cp scripts/system-upgrade.sh build/usr/local/bin/
         cp scripts/install-firmware.sh build/usr/local/bin/
         cp scripts/install-indi-package.sh build/usr/local/bin/
+        cp scripts/ensure-required-packages.sh build/usr/local/bin/
         cp scripts/manage-samba.sh build/usr/local/bin/
         cp scripts/wifi-connect.sh build/usr/local/bin/
         cp scripts/wifi-automanage.py build/usr/local/bin/

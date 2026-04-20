@@ -200,14 +200,28 @@ enable_hotspot() {
         
         # Try finding the connection we just created (active on selected hotspot interface)
         NEW_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":$HOTSPOT_IFACE" | cut -d: -f1 | head -n1)
-        
+
+        # Apply explicit AP profile settings for predictable behavior across NM versions.
+        PROFILE_CANDIDATES=()
         if [ -n "$NEW_CONN" ]; then
-             echo "Configuring powersave for $NEW_CONN"
-             nmcli connection modify "$NEW_CONN" 802-11-wireless.powersave 2 || true
-        else
-             # Fallback to hardcoded names just in case
-             nmcli connection modify hotspot-ap 802-11-wireless.powersave 2 2>/dev/null || true
+            PROFILE_CANDIDATES+=("$NEW_CONN")
         fi
+        PROFILE_CANDIDATES+=("hotspot-ap" "Hotspot")
+
+        for conn in "${PROFILE_CANDIDATES[@]}"; do
+            if nmcli connection show "$conn" >/dev/null 2>&1; then
+                echo "Configuring hotspot profile: $conn"
+                nmcli connection modify "$conn" connection.autoconnect yes || true
+                nmcli connection modify "$conn" connection.autoconnect-priority -100 || true
+                nmcli connection modify "$conn" 802-11-wireless.mode ap || true
+                nmcli connection modify "$conn" ipv4.method shared || true
+                nmcli connection modify "$conn" ipv6.method disabled || true
+                nmcli connection modify "$conn" wifi-sec.key-mgmt wpa-psk || true
+                nmcli connection modify "$conn" wifi-sec.psk "$HOTSPOT_PASSWORD" || true
+                nmcli connection modify "$conn" 802-11-wireless.powersave 2 || true
+                break
+            fi
+        done
 
         # Extra safeguard: also disable kernel powersave flag for this device
         if command -v iw >/dev/null 2>&1; then
