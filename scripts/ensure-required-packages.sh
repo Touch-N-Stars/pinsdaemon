@@ -3,6 +3,8 @@ set -euo pipefail
 
 REQUIRED_PACKAGES=(
     "pins-nitecrawlersdk"
+    "pins-plugin-alpaca"
+    "pins-plugin-groundstation"
     "pins-plugin-joko"
     "pins-plugin-livestack"
     "pins-plugin-nightsummary"
