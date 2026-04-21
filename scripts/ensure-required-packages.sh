@@ -13,7 +13,7 @@ REQUIRED_PACKAGES=(
     "pins-plugin-phd2tools"
     "pins-plugin-pins"
     "pins-plugin-polaralignment"
-    "pins-plugin-tenmicron"
+   # "pins-plugin-tenmicron"
     "pins-plugin-touch-n-stars"
     "pins-wanderercoversdk"
     "pins-wandereretasdk"
