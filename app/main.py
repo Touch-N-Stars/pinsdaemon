@@ -76,6 +76,7 @@ AVAILABLE_PLUGIN_PACKAGES = [
     "pins-plugin-livestack",
     "pins-plugin-nightsummary",
     "pins-plugin-ninaapi",
+    "pins-plugin-orbitals",
     "pins-plugin-orbuculum",
     "pins-plugin-phd2tools",
     "pins-plugin-pins",
@@ -203,6 +204,7 @@ class PluginInfo(BaseModel):
     packageName: str
     installed: bool
     installedVersion: Optional[str] = None
+    availableVersion: Optional[str] = None
 
 
 class PluginsResponse(BaseModel):
@@ -801,6 +803,14 @@ async def list_indi3rdparty_packages(onlyNotInstalled: bool = False, q: Optional
 
 @app.get("/plugins", response_model=PluginsResponse, dependencies=[Depends(verify_token)])
 async def list_plugins():
+    try:
+        packages_text = await asyncio.to_thread(_fetch_packages_index, UPDATES_PACKAGES_URL)
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch repo metadata: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch repo metadata: {e}")
+
+    repo_versions = _parse_packages_versions(packages_text)
     installed_versions = await _get_installed_package_versions()
 
     plugins = [
@@ -808,6 +818,7 @@ async def list_plugins():
             packageName=package_name,
             installed=package_name in installed_versions,
             installedVersion=installed_versions.get(package_name),
+            availableVersion=repo_versions.get(package_name),
         )
         for package_name in AVAILABLE_PLUGIN_PACKAGES
     ]
