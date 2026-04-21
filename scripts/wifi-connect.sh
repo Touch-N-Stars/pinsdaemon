@@ -8,6 +8,9 @@ DEFAULT_WIFI_INTERFACE="wlan0"
 FORCE_HOTSPOT=false
 CLIENT_IFACE=""
 HOTSPOT_IFACE=""
+PARALLEL_WIFI_MODE=false
+EXPLICIT_CLIENT_IFACE=false
+EXPLICIT_HOTSPOT_IFACE=false
 
 # Parse flags while keeping positional support for backward compatibility.
 POSITIONAL_ARGS=()
@@ -19,10 +22,12 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         --client-iface)
             CLIENT_IFACE="$2"
+            EXPLICIT_CLIENT_IFACE=true
             shift 2
             ;;
         --hotspot-iface)
             HOTSPOT_IFACE="$2"
+            EXPLICIT_HOTSPOT_IFACE=true
             shift 2
             ;;
         --)
@@ -87,6 +92,23 @@ validate_or_fallback_interface() {
     printf "%s" "$fallback"
 }
 
+find_secondary_wifi_interface() {
+    local primary="$1"
+
+    nmcli -t -f DEVICE,TYPE device status 2>/dev/null \
+        | awk -F: '$2=="wifi" {print $1}' \
+        | grep -vx "$primary" \
+        | head -n1
+}
+
+is_hotspot_active_on_interface() {
+    local iface="$1"
+
+    nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
+        | awk -F: -v target_iface="$iface" '$2=="802-11-wireless" && $3==target_iface {print $1}' \
+        | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
+}
+
 if [ -z "$CLIENT_IFACE" ]; then
     CLIENT_IFACE="$(get_wifi_interface_from_config "client_interface")"
 fi
@@ -103,6 +125,25 @@ fi
 
 CLIENT_IFACE="$(validate_or_fallback_interface "$CLIENT_IFACE" "$DEFAULT_WIFI_INTERFACE" "client")"
 HOTSPOT_IFACE="$(validate_or_fallback_interface "$HOTSPOT_IFACE" "$CLIENT_IFACE" "hotspot")"
+
+# If only one interface is configured but another Wi-Fi adapter is available,
+# keep client and hotspot on separate adapters.
+if [ "$CLIENT_IFACE" = "$HOTSPOT_IFACE" ]; then
+    if [ "$EXPLICIT_CLIENT_IFACE" = true ] && [ "$EXPLICIT_HOTSPOT_IFACE" = true ]; then
+        echo "Using explicit interface selection from caller: client=$CLIENT_IFACE hotspot=$HOTSPOT_IFACE"
+    else
+        SECONDARY_IFACE="$(find_secondary_wifi_interface "$CLIENT_IFACE")"
+        if [ -n "$SECONDARY_IFACE" ]; then
+            HOTSPOT_IFACE="$SECONDARY_IFACE"
+            PARALLEL_WIFI_MODE=true
+            echo "Detected secondary Wi-Fi adapter ($SECONDARY_IFACE). Enabling parallel client+hotspot mode."
+        fi
+    fi
+fi
+
+if [ "$CLIENT_IFACE" != "$HOTSPOT_IFACE" ]; then
+    PARALLEL_WIFI_MODE=true
+fi
 
 echo "Using interfaces: client=$CLIENT_IFACE hotspot=$HOTSPOT_IFACE"
 
@@ -270,19 +311,23 @@ nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
 # Give it a moment to populate
 sleep 3
 
-# 1. Remove existing hotspot connection if any
-# Find any connections named "hotspot-ap" or starting with "Hotspot" (default nmcli naming)
-echo "Cleaning up existing hotspot connections..."
-existing_hotspots=$(nmcli -t -f NAME connection show | grep -E "^(Hotspot|hotspot-ap)")
+# 1. Remove existing hotspot connection only in single-adapter mode.
+# In dual-adapter mode we intentionally keep hotspot on the dedicated interface.
+if [ "$PARALLEL_WIFI_MODE" = false ]; then
+    echo "Cleaning up existing hotspot connections..."
+    existing_hotspots=$(nmcli -t -f NAME connection show | grep -E "^(Hotspot|hotspot-ap)")
 
-if [ -n "$existing_hotspots" ]; then
-    # Process each line to handle potential spaces in names
-    while IFS= read -r conn; do
-        if [ -n "$conn" ]; then
-            echo "Removing hotspot connection: $conn"
-            nmcli connection delete "$conn" || true
-        fi
-    done <<< "$existing_hotspots"
+    if [ -n "$existing_hotspots" ]; then
+        # Process each line to handle potential spaces in names
+        while IFS= read -r conn; do
+            if [ -n "$conn" ]; then
+                echo "Removing hotspot connection: $conn"
+                nmcli connection delete "$conn" || true
+            fi
+        done <<< "$existing_hotspots"
+    fi
+else
+    echo "Parallel Wi-Fi mode active. Keeping hotspot profile on $HOTSPOT_IFACE."
 fi
 
 # 2. Clean up any EXISTING profiles for the target SSID
@@ -380,6 +425,16 @@ if [ $CONNECT_SUCCESS -ne 0 ]; then
 fi
 
 echo "Successfully connected to $SSID."
+
+if [ "$PARALLEL_WIFI_MODE" = true ]; then
+    if ! is_hotspot_active_on_interface "$HOTSPOT_IFACE"; then
+        echo "Parallel mode: hotspot not active on $HOTSPOT_IFACE. Starting hotspot..."
+        enable_hotspot || echo "Warning: failed to enable hotspot in parallel mode."
+    else
+        echo "Parallel mode: hotspot already active on $HOTSPOT_IFACE."
+    fi
+fi
+
 # Optional: Disable powersave on client connection too
 # Filter specifically for wireless connections to avoid configuring ethernet connections
 CURRENT_CONN=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | grep ":802-11-wireless:$CLIENT_IFACE" | cut -d: -f1 | head -n1)
