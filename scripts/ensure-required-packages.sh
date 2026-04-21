@@ -3,18 +3,6 @@ set -euo pipefail
 
 REQUIRED_PACKAGES=(
     "pins-nitecrawlersdk"
-    "pins-plugin-alpaca"
-    "pins-plugin-groundstation"
-    "pins-plugin-joko"
-    "pins-plugin-livestack"
-    "pins-plugin-nightsummary"
-    "pins-plugin-ninaapi"
-    "pins-plugin-orbuculum"
-    "pins-plugin-phd2tools"
-    "pins-plugin-pins"
-    "pins-plugin-polaralignment"
-    "pins-plugin-tenmicron"
-    "pins-plugin-touch-n-stars"
     "pins-wanderercoversdk"
     "pins-wandereretasdk"
     "pins-wandererrotatorsdk"

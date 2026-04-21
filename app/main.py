@@ -46,6 +46,10 @@ WIFI_SCAN_SCRIPT_PATH = os.getenv("WIFI_SCAN_SCRIPT_PATH", DEFAULT_WIFI_SCAN)
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
 FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-firmware.sh")
 INDI_INSTALL_SCRIPT_PATH = os.getenv("INDI_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-indi-package.sh")
+DEFAULT_PLUGIN_MANAGE_SCRIPT = "/usr/local/bin/manage-plugin.sh"
+if not os.path.exists(DEFAULT_PLUGIN_MANAGE_SCRIPT):
+    DEFAULT_PLUGIN_MANAGE_SCRIPT = os.path.join(os.path.dirname(__file__), "../scripts/manage-plugin.sh")
+PLUGIN_MANAGE_SCRIPT_PATH = os.getenv("PLUGIN_MANAGE_SCRIPT_PATH", DEFAULT_PLUGIN_MANAGE_SCRIPT)
 DEFAULT_REQUIRED_PACKAGES_SCRIPT = "/usr/local/bin/ensure-required-packages.sh"
 if not os.path.exists(DEFAULT_REQUIRED_PACKAGES_SCRIPT):
     DEFAULT_REQUIRED_PACKAGES_SCRIPT = os.path.join(os.path.dirname(__file__), "../scripts/ensure-required-packages.sh")
@@ -64,6 +68,20 @@ UPDATES_PACKAGES_URL = os.getenv(
 )
 UPDATES_PACKAGE_PATTERNS = [
     p.strip() for p in os.getenv("UPDATES_PACKAGE_PATTERNS", "pins,pinsdaemon,pins-plugin-*").split(",") if p.strip()
+]
+AVAILABLE_PLUGIN_PACKAGES = [
+    "pins-plugin-alpaca",
+    "pins-plugin-groundstation",
+    "pins-plugin-joko",
+    "pins-plugin-livestack",
+    "pins-plugin-nightsummary",
+    "pins-plugin-ninaapi",
+    "pins-plugin-orbuculum",
+    "pins-plugin-phd2tools",
+    "pins-plugin-pins",
+    "pins-plugin-polaralignment",
+    "pins-plugin-tenmicron",
+    "pins-plugin-touch-n-stars",
 ]
 UPGRADE_LAST_JOB_FILE = os.getenv("UPGRADE_LAST_JOB_FILE", "/opt/pinsdaemon/last-upgrade-job.json")
 
@@ -179,6 +197,21 @@ class IndiPackagesResponse(BaseModel):
 
 class IndiPackageInstallRequest(BaseModel):
     assetName: str
+
+
+class PluginInfo(BaseModel):
+    packageName: str
+    installed: bool
+    installedVersion: Optional[str] = None
+
+
+class PluginsResponse(BaseModel):
+    checkedAt: str
+    plugins: List[PluginInfo]
+
+
+class PluginActionRequest(BaseModel):
+    packageName: str
 
 
 _IFACE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -569,6 +602,15 @@ def _matches_any_pattern(package_name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(package_name, pattern) for pattern in patterns)
 
 
+def _validate_plugin_package_name(package_name: str) -> str:
+    candidate = package_name.strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="packageName is required")
+    if candidate not in AVAILABLE_PLUGIN_PACKAGES:
+        raise HTTPException(status_code=400, detail=f"Unknown plugin package: {candidate}")
+    return candidate
+
+
 def _write_last_upgrade_job_state(payload: Dict[str, Any]) -> None:
     try:
         state_dir = os.path.dirname(UPGRADE_LAST_JOB_FILE)
@@ -755,6 +797,71 @@ async def list_indi3rdparty_packages(onlyNotInstalled: bool = False, q: Optional
 
     checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     return IndiPackagesResponse(checkedAt=checked_at, onlyNotInstalled=onlyNotInstalled, packages=packages)
+
+
+@app.get("/plugins", response_model=PluginsResponse, dependencies=[Depends(verify_token)])
+async def list_plugins():
+    installed_versions = await _get_installed_package_versions()
+
+    plugins = [
+        PluginInfo(
+            packageName=package_name,
+            installed=package_name in installed_versions,
+            installedVersion=installed_versions.get(package_name),
+        )
+        for package_name in AVAILABLE_PLUGIN_PACKAGES
+    ]
+
+    checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return PluginsResponse(checkedAt=checked_at, plugins=plugins)
+
+
+@app.post("/plugins/install", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def install_plugin(request: PluginActionRequest):
+    package_name = _validate_plugin_package_name(request.packageName)
+
+    if not os.path.exists(PLUGIN_MANAGE_SCRIPT_PATH):
+        raise HTTPException(status_code=500, detail=f"Plugin management script not found at {PLUGIN_MANAGE_SCRIPT_PATH}")
+
+    cmd = ["sudo", "-n", PLUGIN_MANAGE_SCRIPT_PATH, "install", package_name]
+
+    job_id = await job_manager.start_job(cmd)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Failed to create plugin install job")
+
+    return JobResponse(
+        jobId=job.id,
+        status=job.status,
+        exitCode=job.exit_code,
+        startedAt=job.created_at,
+        finishedAt=job.finished_at,
+        command=job.command,
+    )
+
+
+@app.post("/plugins/uninstall", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def uninstall_plugin(request: PluginActionRequest):
+    package_name = _validate_plugin_package_name(request.packageName)
+
+    if not os.path.exists(PLUGIN_MANAGE_SCRIPT_PATH):
+        raise HTTPException(status_code=500, detail=f"Plugin management script not found at {PLUGIN_MANAGE_SCRIPT_PATH}")
+
+    cmd = ["sudo", "-n", PLUGIN_MANAGE_SCRIPT_PATH, "uninstall", package_name]
+
+    job_id = await job_manager.start_job(cmd)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Failed to create plugin uninstall job")
+
+    return JobResponse(
+        jobId=job.id,
+        status=job.status,
+        exitCode=job.exit_code,
+        startedAt=job.created_at,
+        finishedAt=job.finished_at,
+        command=job.command,
+    )
 
 
 @app.post("/packages/indi3rdparty/install", response_model=JobResponse, dependencies=[Depends(verify_token)])
