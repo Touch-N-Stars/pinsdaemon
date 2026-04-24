@@ -67,6 +67,48 @@ if [ -f "/home/pi/pins-scripts/hotspot.sh" ]; then
     chmod 755 /home/pi/pins-scripts/hotspot.sh
 fi
 
+if id "pi" >/dev/null 2>&1; then
+    BASHRC_FILE="/home/pi/.bashrc"
+    if [ -f "$BASHRC_FILE" ]; then
+        sed -i '/^>>> PINS WELCOME >>>/,/^<<< PINS WELCOME <<</d' "$BASHRC_FILE"
+        sed -i '/# >>> PINS WELCOME >>>/,/# <<< PINS WELCOME <<</d' "$BASHRC_FILE"
+        cat >> "$BASHRC_FILE" <<'EOF'
+
+# >>> PINS WELCOME >>>
+    if [[ $- == *i* && -n "$SSH_CONNECTION" ]]; then
+echo "                                                                                        "
+echo "                                                                                        "
+echo "PPPPPPPPPPPPPPPPP        IIIIIIIIII     NNNNNNNN        NNNNNNNN        SSSSSSSSSSSSSSS "
+echo "P::::::::::::::::P       I::::::::I     N:::::::N       N::::::N      SS:::::::::::::::S"
+echo "P::::::PPPPPP:::::P      I::::::::I     N::::::::N      N::::::N     S:::::SSSSSS::::::S"
+echo "PP:::::P     P:::::P     II::::::II     N:::::::::N     N::::::N     S:::::S     SSSSSSS"
+echo "  P::::P     P:::::P       I::::I       N::::::::::N    N::::::N     S:::::S            "
+echo "  P::::P     P:::::P       I::::I       N:::::::::::N   N::::::N     S:::::S            "
+echo "  P::::PPPPPP:::::P        I::::I       N:::::::N::::N  N::::::N      S::::SSSS         "
+echo "  P:::::::::::::PP         I::::I       N::::::N N::::N N::::::N       SS::::::SSSSS    "
+echo "  P::::PPPPPPPPP           I::::I       N::::::N  N::::N:::::::N         SSS::::::::SS  "
+echo "  P::::P                   I::::I       N::::::N   N:::::::::::N            SSSSSS::::S "
+echo "  P::::P                   I::::I       N::::::N    N::::::::::N                 S:::::S"
+echo "  P::::P                   I::::I       N::::::N     N:::::::::N                 S:::::S"
+echo "PP::::::PP               II::::::II     N::::::N      N::::::::N     SSSSSSS     S:::::S"
+echo "P::::::::P               I::::::::I     N::::::N       N:::::::N     S::::::SSSSSS:::::S"
+echo "P::::::::P               I::::::::I     N::::::N        N::::::N     S:::::::::::::::SS "
+echo "PPPPPPPPPP               IIIIIIIIII     NNNNNNNN         NNNNNNN      SSSSSSSSSSSSSSS   "
+echo "                                                                                        "
+echo "                                                                                        "
+echo "                                                                                        "
+echo "                                                                                        "
+echo "                                                                                        "
+echo "                                                                                        "
+echo "                                                                                        "
+echo "version 1.3 Copyright PINS / Touch-N-Stars 2026"
+fi
+# <<< PINS WELCOME <<<
+EOF
+        chown pi:pi "$BASHRC_FILE"
+    fi
+fi
+
 if [ -f "/usr/local/bin/wifi-scan.py" ]; then
     chown root:root /usr/local/bin/wifi-scan.py
     chmod 755 /usr/local/bin/wifi-scan.py
