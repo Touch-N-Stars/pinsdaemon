@@ -77,7 +77,6 @@ if id "pi" >/dev/null 2>&1; then
 # >>> PINS WELCOME >>>
     if [[ $- == *i* && -n "$SSH_CONNECTION" ]]; then
 echo "                                                                                        "
-echo "                                                                                        "
 echo "PPPPPPPPPPPPPPPPP        IIIIIIIIII     NNNNNNNN        NNNNNNNN        SSSSSSSSSSSSSSS "
 echo "P::::::::::::::::P       I::::::::I     N:::::::N       N::::::N      SS:::::::::::::::S"
 echo "P::::::PPPPPP:::::P      I::::::::I     N::::::::N      N::::::N     S:::::SSSSSS::::::S"
@@ -94,11 +93,6 @@ echo "PP::::::PP               II::::::II     N::::::N      N::::::::N     SSSSS
 echo "P::::::::P               I::::::::I     N::::::N       N:::::::N     S::::::SSSSSS:::::S"
 echo "P::::::::P               I::::::::I     N::::::N        N::::::N     S:::::::::::::::SS "
 echo "PPPPPPPPPP               IIIIIIIIII     NNNNNNNN         NNNNNNN      SSSSSSSSSSSSSSS   "
-echo "                                                                                        "
-echo "                                                                                        "
-echo "                                                                                        "
-echo "                                                                                        "
-echo "                                                                                        "
 echo "                                                                                        "
 echo "                                                                                        "
 echo "version 1.3 Copyright PINS / Touch-N-Stars 2026"
