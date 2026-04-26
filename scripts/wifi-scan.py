@@ -11,9 +11,6 @@ def get_wifi_networks():
     # Check if nmcli is available
     # Removed nmcli code block as it was incomplete and iwlist is preferred for this device.
     # if shutil.which("nmcli"): ... 
-            
-    # Fallback to iwlist (more reliable for raw scanning on Pi)
-    # The user explicitly uses iwlist, so we prioritize it or use it exclusively if reliable.
     try:
         # Determine iwlist path
         iwlist_path = "iwlist"
