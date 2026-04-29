@@ -22,28 +22,47 @@ A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expo
 
 ```mermaid
 graph TD
-    Client[API Client] -->|HTTP/WS + Token| API[FastAPI Daemon]
-    
-    subgraph "System Service (sysupdate-api)"
-        API
-        JobMgr[Job Manager]
-    end
-    
-    API -->|Async| JobMgr
-    
-    subgraph "Privileged Operations (sudo)"
-        Script1[system-upgrade.sh]
-        Script2[manage-samba.sh]
-        Script3[wifi-connect.sh]
-        Script4[iwlist / nmcli]
-    end
-    
-    JobMgr -->|sudo -n| Script1
-    JobMgr -->|sudo -n| Script2
-    JobMgr -->|sudo -n| Script3
-    
-    API -->|python3| Script5[wifi-scan.py]
-    Script5 -->|sudo| Script4
+  Client[API Client] -->|HTTP + Bearer Token| API[FastAPI Daemon]
+  Client -->|WebSocket logs| WS[/logs/{jobId}]
+  WS --> API
+
+  subgraph "System Service (sysupdate-api)"
+    API
+    Startup[Startup Task]
+    JobMgr[Job Manager]
+  end
+
+  API -->|On startup| Startup
+  Startup -->|sudo -n| EnsureReq[ensure-required-packages.sh]
+
+  API -->|Async jobs| JobMgr
+
+  subgraph "Privileged Operations (sudo -n)"
+    Upgrade[system-upgrade.sh]
+    Firmware[install-firmware.sh]
+    Indi[install-indi-package.sh]
+    Plugin[manage-plugin.sh]
+    Samba[manage-samba.sh]
+    WifiConnect[wifi-connect.sh]
+    SysCtl[systemctl / timedatectl / cat leases]
+  end
+
+  JobMgr --> Upgrade
+  JobMgr --> Firmware
+  JobMgr --> Indi
+  JobMgr --> Plugin
+  JobMgr --> Samba
+  JobMgr --> WifiConnect
+  JobMgr --> SysCtl
+
+  API -->|python3| WifiScan[wifi-scan.py]
+  WifiScan -->|sudo iwlist| Radio[iwlist / nmcli]
+
+  API -->|Repo metadata| Repo[(APT Packages index)]
+  API -->|Release metadata| GitHub[(GitHub Releases API)]
+
+  NM[NetworkManager Dispatcher] --> WifiRecovery[90-pins-wifi-recovery]
+  WifiRecovery -->|Reconnect / fallback| WifiConnect
 ```
 
 The daemon provides a facade over system shell scripts. Long-running tasks (like upgrades or Wi-Fi connections) are executed asynchronously as "Jobs". Clients receive a `Job ID` immediately and can use it to poll status or stream logs via WebSockets.
