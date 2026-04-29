@@ -23,7 +23,7 @@ A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expo
 ```mermaid
 graph TD
   Client[API Client] -->|HTTP + Bearer Token| API[FastAPI Daemon]
-  Client -->|WebSocket logs| WS[/logs/{jobId}]
+  Client -->|WebSocket logs| WS[/logs/:job_id]
   WS --> API
 
   subgraph "System Service (sysupdate-api)"
