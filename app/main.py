@@ -10,7 +10,7 @@ import urllib.error
 from datetime import datetime
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
 
 from .auth import verify_token
@@ -84,6 +84,15 @@ AVAILABLE_PLUGIN_PACKAGES = [
     "pins-plugin-tenmicron",
     "pins-plugin-touch-n-stars",
 ]
+ALLOWED_INDI_3RDPARTY_TYPES = {
+    "filterwheel",
+    "flatpanel",
+    "focuser",
+    "rotator",
+    "switches",
+    "telescope",
+    "weather",
+}
 UPGRADE_LAST_JOB_FILE = os.getenv("UPGRADE_LAST_JOB_FILE", "/opt/pinsdaemon/last-upgrade-job.json")
 
 class UpgradeRequest(BaseModel):
@@ -197,7 +206,11 @@ class IndiPackagesResponse(BaseModel):
 
 
 class IndiPackageInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     assetName: str
+    label: Optional[str] = None
+    type: Optional[str] = None
 
 
 class PluginInfo(BaseModel):
@@ -613,6 +626,43 @@ def _validate_plugin_package_name(package_name: str) -> str:
     return candidate
 
 
+def _normalize_indi_3rdparty_type(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+
+    candidate = value.strip().lower()
+    if not candidate:
+        return None
+
+    aliases = {
+        "filterwheels": "filterwheel",
+        "flatpanels": "flatpanel",
+        "focusers": "focuser",
+        "rotators": "rotator",
+        "switch": "switches",
+        "telescopes": "telescope",
+    }
+    normalized = aliases.get(candidate, candidate)
+
+    if normalized not in ALLOWED_INDI_3RDPARTY_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid INDI 3rdparty type: {value}. Allowed: {', '.join(sorted(ALLOWED_INDI_3RDPARTY_TYPES))}",
+        )
+    return normalized
+
+
+def _normalize_optional_text(value: Optional[str], field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if len(candidate) > 200:
+        raise HTTPException(status_code=400, detail=f"{field_name} is too long")
+    return candidate
+
+
 def _write_last_upgrade_job_state(payload: Dict[str, Any]) -> None:
     try:
         state_dir = os.path.dirname(UPGRADE_LAST_JOB_FILE)
@@ -881,6 +931,9 @@ async def install_indi3rdparty_package(request: IndiPackageInstallRequest):
     if not target_asset:
         raise HTTPException(status_code=400, detail="assetName is required")
 
+    entry_type = _normalize_indi_3rdparty_type(request.type)
+    entry_label = _normalize_optional_text(request.label, "label")
+
     try:
         packages = await _build_indi_packages(only_not_installed=False, name_filter=None)
     except urllib.error.URLError as e:
@@ -893,6 +946,10 @@ async def install_indi3rdparty_package(request: IndiPackageInstallRequest):
         raise HTTPException(status_code=404, detail="Selected package asset not found in latest release")
 
     cmd = ["sudo", "-n", INDI_INSTALL_SCRIPT_PATH, selected.downloadUrl, selected.assetName]
+    if entry_type:
+        cmd.extend(["--type", entry_type])
+    if entry_label:
+        cmd.extend(["--label", entry_label])
     job_id = await job_manager.start_job(cmd)
     job = job_manager.get_job(job_id)
     if not job:
