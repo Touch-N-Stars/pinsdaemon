@@ -109,6 +109,7 @@ echo "Updating INDI 3rdparty registry at $INDI_3RDPARTY_JSON_PATH..."
 if ! python3 - "$INDI_3RDPARTY_JSON_PATH" "$PACKAGE_NAME" "$ENTRY_TYPE" "$ENTRY_LABEL" <<'PY'
 import json
 import os
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -211,6 +212,43 @@ def label_from_driver_name(driver_name: str) -> str:
     if "_" in base:
         return " ".join(part.upper() for part in base.split("_") if part)
     return base.upper()
+
+
+def package_hint_tokens(package_name_raw: str) -> list[str]:
+    n = package_name_raw.strip().lower()
+    if n.startswith("indi-"):
+        n = n[5:]
+
+    n = n.replace("3rdparty", "")
+    for suffix in ("base", "driver", "drivers", "plugin", "plugins"):
+        if n.endswith(suffix):
+            n = n[: -len(suffix)]
+
+    tokens: list[str] = []
+    for token in re.split(r"[^a-z0-9]+", n):
+        t = token.strip()
+        if len(t) >= 3:
+            tokens.append(t)
+    return sorted(set(tokens))
+
+
+def filter_entries_by_package_hint(
+    package_name_raw: str,
+    entries: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    tokens = package_hint_tokens(package_name_raw)
+    if not tokens:
+        return entries
+
+    filtered: list[tuple[str, str, str]] = []
+    for name, label, dtype in entries:
+        normalized = name.lower().replace("indi_", "")
+        if any(token in normalized for token in tokens):
+            filtered.append((name, label, dtype))
+
+    if filtered:
+        return filtered
+    return entries
 
 
 def list_package_files(pkg: str) -> list[str]:
@@ -328,7 +366,8 @@ def summarize_names(names: list[str], max_items: int = 20) -> str:
 if entry_type:
     entry_type = normalize_type(entry_type)
 
-entries, xml_driver_names, bin_only_driver_names = discover_drivers(package_name)
+all_discovered_entries, xml_driver_names, bin_only_driver_names = discover_drivers(package_name)
+entries = filter_entries_by_package_hint(package_name, all_discovered_entries)
 if not entries:
     print(
         "Warning: no INDI drivers discovered from installed package; "
@@ -346,11 +385,29 @@ print(f"  XML drivers: {summarize_names(xml_driver_names)}")
 print(f"  Binary fallback drivers: {summarize_names(bin_only_driver_names)}")
 
 if entry_type:
-    entries = [(name, label, entry_type) for name, label, _ in entries]
+    if len(entries) == 1:
+        name, label, _ = entries[0]
+        entries = [(name, label, entry_type)]
+    else:
+        matching_count = sum(1 for _, _, dtype in entries if dtype == entry_type)
+        print(
+            f"Info: keeping discovered types for {len(entries)} drivers "
+            f"(requested type='{entry_type}', matches={matching_count}).",
+            file=sys.stderr,
+        )
 
 if entry_label and len(entries) == 1:
     name, _, dtype = entries[0]
     entries = [(name, entry_label, dtype)]
+elif entry_label and len(entries) > 1:
+    print(
+        "Warning: label override ignored because multiple drivers were discovered.",
+        file=sys.stderr,
+    )
+
+all_discovered_names = {name for name, _, _ in all_discovered_entries}
+selected_names = {name for name, _, _ in entries}
+non_selected_discovered_names = all_discovered_names - selected_names
 
 default_data = {
     "filterwheel": [],
@@ -374,7 +431,34 @@ if os.path.exists(json_path):
     except Exception:
         pass
 
+if non_selected_discovered_names:
+    pruned_count = 0
+    for bucket_name, bucket_entries in list(data.items()):
+        if not isinstance(bucket_entries, list):
+            continue
+        kept = []
+        for existing in bucket_entries:
+            if isinstance(existing, dict) and existing.get("Name") in non_selected_discovered_names:
+                pruned_count += 1
+                continue
+            kept.append(existing)
+        data[bucket_name] = kept
+    if pruned_count > 0:
+        print(f"Pruned {pruned_count} non-selected discovered driver entr(y/ies) from registry")
+
 for name, label, dtype in entries:
+    # Remove stale duplicates across other buckets when the same driver name is reassigned.
+    for bucket_name, bucket_entries in data.items():
+        if bucket_name == dtype:
+            continue
+        if not isinstance(bucket_entries, list):
+            continue
+        data[bucket_name] = [
+            existing
+            for existing in bucket_entries
+            if not (isinstance(existing, dict) and existing.get("Name") == name)
+        ]
+
     entry = {"Name": name, "Label": label, "Type": dtype}
     bucket = data.setdefault(dtype, [])
     updated = False
