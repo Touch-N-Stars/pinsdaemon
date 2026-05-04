@@ -3,6 +3,7 @@ set -euo pipefail
 
 ACTION="${1:-}"
 PACKAGE_NAME="${2:-}"
+PINS_SERVICE_RESTART_CANDIDATES="${PINS_SERVICE_RESTART_CANDIDATES:-pins.service sysupdate-api.service}"
 
 ALLOWED_PLUGINS=(
     "pins-plugin-alpaca"
@@ -49,6 +50,32 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 
+restart_pins_service() {
+    local service_list
+    local service_name
+    local load_state
+
+    service_list="$PINS_SERVICE_RESTART_CANDIDATES"
+    for service_name in $service_list; do
+        if [[ "$service_name" != *.service ]]; then
+            service_name="${service_name}.service"
+        fi
+
+        load_state="$(systemctl show -p LoadState --value "$service_name" 2>/dev/null || true)"
+        if [[ "$load_state" != "loaded" ]]; then
+            continue
+        fi
+
+        echo "Restarting service: $service_name"
+        systemctl restart "$service_name"
+        echo "Service restarted successfully: $service_name"
+        return 0
+    done
+
+    echo "Failed to find a loaded PINS service to restart. Checked: $service_list" >&2
+    return 1
+}
+
 if [[ "$ACTION" == "install" ]]; then
     echo "Installing plugin package: $PACKAGE_NAME"
     apt-get update
@@ -60,3 +87,4 @@ fi
 echo "Uninstalling plugin package: $PACKAGE_NAME"
 apt-get remove -y "$PACKAGE_NAME"
 echo "Plugin uninstalled successfully: $PACKAGE_NAME"
+restart_pins_service
