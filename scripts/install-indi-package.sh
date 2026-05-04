@@ -214,6 +214,25 @@ def label_from_driver_name(driver_name: str) -> str:
     return base.upper()
 
 
+def is_supported_driver_name(driver_name: str) -> bool:
+    n = driver_name.strip().lower()
+    if not n:
+        return False
+
+    unsupported_camera_markers = (
+        "_ccd",
+        "ccd_",
+        "_camera",
+        "camera_",
+    )
+    if n.endswith("ccd") or n.endswith("camera"):
+        return False
+    if any(marker in n for marker in unsupported_camera_markers):
+        return False
+
+    return True
+
+
 def package_hint_tokens(package_name_raw: str) -> list[str]:
     n = package_name_raw.strip().lower()
     if n.startswith("indi-"):
@@ -301,10 +320,11 @@ def list_package_driver_binaries(pkg_files: list[str]) -> list[str]:
     return sorted(set(result))
 
 
-def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], list[str]]:
+def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], list[str], list[str]]:
     pkg_files = list_package_files(pkg)
     discovered_from_xml: list[tuple[str, str, str]] = []
     discovered_from_bins: list[tuple[str, str, str]] = []
+    ignored_unsupported_names: list[str] = []
     xml_files = list_package_xml_files(pkg_files)
     bin_files = list_package_driver_binaries(pkg_files)
 
@@ -321,6 +341,9 @@ def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], l
                 name = (device.get("driver") or device.get("name") or "").strip()
                 label = (device.get("label") or name).strip()
                 if name:
+                    if not is_supported_driver_name(name):
+                        ignored_unsupported_names.append(name)
+                        continue
                     discovered_from_xml.append((name, label if label else name, group))
                     found_in_group = True
 
@@ -331,11 +354,17 @@ def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], l
             name = (device.get("driver") or device.get("name") or "").strip()
             label = (device.get("label") or name).strip()
             if name:
+                if not is_supported_driver_name(name):
+                    ignored_unsupported_names.append(name)
+                    continue
                 discovered_from_xml.append((name, label if label else name, "switches"))
 
     for bin_path in bin_files:
         name = os.path.basename(bin_path).strip()
         if not name:
+            continue
+        if not is_supported_driver_name(name):
+            ignored_unsupported_names.append(name)
             continue
         discovered_from_bins.append((name, label_from_driver_name(name), type_from_driver_name(name)))
 
@@ -350,9 +379,10 @@ def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], l
     xml_names = sorted({name for name, _, _ in discovered_from_xml})
     bin_names = sorted({name for name, _, _ in discovered_from_bins})
     bin_only_names = [name for name in bin_names if name not in set(xml_names)]
+    ignored_names = sorted(set(ignored_unsupported_names))
 
     merged_entries = [merged_by_name[name] for name in sorted(merged_by_name.keys())]
-    return merged_entries, xml_names, bin_only_names
+    return merged_entries, xml_names, bin_only_names, ignored_names
 
 
 def summarize_names(names: list[str], max_items: int = 20) -> str:
@@ -366,7 +396,7 @@ def summarize_names(names: list[str], max_items: int = 20) -> str:
 if entry_type:
     entry_type = normalize_type(entry_type)
 
-all_discovered_entries, xml_driver_names, bin_only_driver_names = discover_drivers(package_name)
+all_discovered_entries, xml_driver_names, bin_only_driver_names, ignored_unsupported_driver_names = discover_drivers(package_name)
 entries = filter_entries_by_package_hint(package_name, all_discovered_entries)
 if not entries:
     print(
@@ -383,6 +413,11 @@ print(
 )
 print(f"  XML drivers: {summarize_names(xml_driver_names)}")
 print(f"  Binary fallback drivers: {summarize_names(bin_only_driver_names)}")
+if ignored_unsupported_driver_names:
+    print(
+        f"  Ignored unsupported camera drivers ({len(ignored_unsupported_driver_names)}): "
+        f"{summarize_names(ignored_unsupported_driver_names)}"
+    )
 
 if entry_type:
     if len(entries) == 1:
@@ -407,7 +442,8 @@ elif entry_label and len(entries) > 1:
 
 all_discovered_names = {name for name, _, _ in all_discovered_entries}
 selected_names = {name for name, _, _ in entries}
-non_selected_discovered_names = all_discovered_names - selected_names
+ignored_unsupported_names = set(ignored_unsupported_driver_names)
+non_selected_discovered_names = (all_discovered_names - selected_names) | ignored_unsupported_names
 
 default_data = {
     "filterwheel": [],
