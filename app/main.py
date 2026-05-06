@@ -8,6 +8,7 @@ import fnmatch
 import urllib.request
 import urllib.error
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
@@ -398,8 +399,42 @@ async def is_hotspot_active_on_interface(interface: str) -> bool:
 
     return False
 
+_TIMEZONE_NAME_RE = re.compile(r"^[A-Za-z0-9._+\-/]+$")
+
+
 class SystemTimeRequest(BaseModel):
-    timestamp: float
+    model_config = ConfigDict(extra="forbid")
+
+    dateTime: str
+    timezone: str
+
+
+def _validate_timezone_name(value: str) -> str:
+    candidate = value.strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="timezone is required")
+    if not _TIMEZONE_NAME_RE.fullmatch(candidate):
+        raise HTTPException(status_code=400, detail=f"Invalid timezone: {value}")
+    try:
+        ZoneInfo(candidate)
+    except ZoneInfoNotFoundError:
+        raise HTTPException(status_code=400, detail=f"Unknown timezone: {value}")
+    return candidate
+
+
+def _parse_request_datetime(value: str) -> datetime:
+    candidate = value.strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="dateTime is required")
+
+    # Accept common UTC suffix and parse ISO datetime.
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="dateTime must be a valid ISO-8601 datetime")
 
 class PiTemperatureResponse(BaseModel):
     celsius: float
@@ -1586,9 +1621,18 @@ async def get_system_time():
 @app.post("/system/time", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def set_system_time(request: SystemTimeRequest):
     """
-    Sets the system time using timedatectl (requires sudo).
-    The timestamp should be a float (Unix epoch).
+    Sets system timezone and system time using timedatectl (requires sudo).
+    dateTime should be ISO-8601 and timezone should be an IANA timezone.
     """
+    timezone_name = _validate_timezone_name(request.timezone)
+    request_dt = _parse_request_datetime(request.dateTime)
+    target_zone = ZoneInfo(timezone_name)
+
+    if request_dt.tzinfo is None:
+        target_dt = request_dt.replace(tzinfo=target_zone)
+    else:
+        target_dt = request_dt.astimezone(target_zone)
+
     # First, disable NTP (Automatic time synchronization) to avoid errors
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1596,13 +1640,33 @@ async def set_system_time(request: SystemTimeRequest):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        await proc.wait()
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip() or "timedatectl set-ntp failed"
+            raise HTTPException(status_code=500, detail=detail)
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Error disabling NTP: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to disable NTP: {e}")
 
-    # Convert timestamp to format expected by timedatectl: "YYYY-MM-DD HH:MM:SS"
-    dt = datetime.fromtimestamp(request.timestamp)
-    time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+    # Set timezone before setting local wall time.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "-n", "timedatectl", "set-timezone", timezone_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            detail = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip() or "timedatectl set-timezone failed"
+            raise HTTPException(status_code=500, detail=detail)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to set timezone: {e}")
+
+    # Format datetime for timedatectl set-time in device local timezone.
+    time_str = target_dt.strftime("%Y-%m-%d %H:%M:%S")
     
     # We use sudo timedatectl set-time "..."
     cmd = ["sudo", "-n", "timedatectl", "set-time", time_str]

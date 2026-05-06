@@ -303,7 +303,8 @@ Update the default hotspot password used by hotspot mode.
 - **Body**:
   ```json
   {
-    "timestamp": 1710000000.0
+    "dateTime": "2026-05-06T21:30:00+02:00",
+    "timezone": "Europe/Berlin"
   }
   ```
 - **Response**: `JobResponse` object.
