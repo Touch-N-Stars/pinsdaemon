@@ -21,6 +21,11 @@ ALLOWED_PLUGINS=(
     "pins-plugin-touch-n-stars"
 )
 
+PROTECTED_PLUGINS=(
+    "pins-plugin-ninaapi"
+    "pins-plugin-touch-n-stars"
+)
+
 if [[ -z "$ACTION" || -z "$PACKAGE_NAME" ]]; then
     echo "Usage: $0 <install|uninstall> <package-name>"
     exit 1
@@ -47,6 +52,13 @@ if [[ "$is_allowed" != true ]]; then
     echo "Package is not an allowed plugin: $PACKAGE_NAME"
     exit 1
 fi
+
+for protected in "${PROTECTED_PLUGINS[@]}"; do
+    if [[ "$protected" == "$PACKAGE_NAME" ]]; then
+        echo "Package is protected and cannot be installed or removed: $PACKAGE_NAME"
+        exit 1
+    fi
+done
 
 export DEBIAN_FRONTEND=noninteractive
 

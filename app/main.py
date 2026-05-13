@@ -93,6 +93,10 @@ AVAILABLE_PLUGIN_PACKAGES = [
     "pins-plugin-tenmicron",
     "pins-plugin-touch-n-stars",
 ]
+PROTECTED_PLUGIN_PACKAGES = {
+    "pins-plugin-ninaapi",
+    "pins-plugin-touch-n-stars",
+}
 ALLOWED_INDI_3RDPARTY_TYPES = {
     "filterwheel",
     "flatpanel",
@@ -660,12 +664,14 @@ def _matches_any_pattern(package_name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(package_name, pattern) for pattern in patterns)
 
 
-def _validate_plugin_package_name(package_name: str) -> str:
+def _validate_plugin_package_name(package_name: str, *, for_action: bool = False) -> str:
     candidate = package_name.strip()
     if not candidate:
         raise HTTPException(status_code=400, detail="packageName is required")
     if candidate not in AVAILABLE_PLUGIN_PACKAGES:
         raise HTTPException(status_code=400, detail=f"Unknown plugin package: {candidate}")
+    if for_action and candidate in PROTECTED_PLUGIN_PACKAGES:
+        raise HTTPException(status_code=403, detail=f"Package cannot be installed or removed: {candidate}")
     return candidate
 
 
@@ -978,7 +984,7 @@ async def list_plugins():
 
 @app.post("/plugins/install", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def install_plugin(request: PluginActionRequest):
-    package_name = _validate_plugin_package_name(request.packageName)
+    package_name = _validate_plugin_package_name(request.packageName, for_action=True)
 
     if not os.path.exists(PLUGIN_MANAGE_SCRIPT_PATH):
         raise HTTPException(status_code=500, detail=f"Plugin management script not found at {PLUGIN_MANAGE_SCRIPT_PATH}")
@@ -1002,7 +1008,7 @@ async def install_plugin(request: PluginActionRequest):
 
 @app.post("/plugins/uninstall", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def uninstall_plugin(request: PluginActionRequest):
-    package_name = _validate_plugin_package_name(request.packageName)
+    package_name = _validate_plugin_package_name(request.packageName, for_action=True)
 
     if not os.path.exists(PLUGIN_MANAGE_SCRIPT_PATH):
         raise HTTPException(status_code=500, detail=f"Plugin management script not found at {PLUGIN_MANAGE_SCRIPT_PATH}")
