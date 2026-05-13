@@ -800,17 +800,16 @@ async def _ensure_required_packages_on_startup() -> None:
         print(f"Startup required package check failed to execute: {e}")
 
 
-async def _run_wifi_automanage_on_startup() -> None:
-    if not STARTUP_WIFI_AUTOMANAGE_ENABLED:
-        print("Startup Wi-Fi auto-manage is disabled.")
-        return
-
+async def _run_wifi_automanage(reason: str, attempts: int, delay_seconds: float) -> None:
     if not os.path.exists(WIFI_AUTOMANAGE_SCRIPT_PATH):
         print(f"Wi-Fi auto-manage script not found at {WIFI_AUTOMANAGE_SCRIPT_PATH}; skipping startup Wi-Fi auto-manage.")
         return
 
-    print(f"Starting Wi-Fi auto-manage using {WIFI_AUTOMANAGE_SCRIPT_PATH}")
-    for attempt in range(1, STARTUP_WIFI_AUTOMANAGE_ATTEMPTS + 1):
+    attempts = max(1, attempts)
+    delay_seconds = max(0.0, delay_seconds)
+
+    print(f"Starting Wi-Fi auto-manage ({reason}) using {WIFI_AUTOMANAGE_SCRIPT_PATH}")
+    for attempt in range(1, attempts + 1):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "sudo", "-n", WIFI_AUTOMANAGE_SCRIPT_PATH,
@@ -824,24 +823,36 @@ async def _run_wifi_automanage_on_startup() -> None:
                     break
                 decoded_line = line.decode(errors="replace").rstrip()
                 if decoded_line:
-                    print(f"[startup-wifi-automanage] {decoded_line}")
+                    print(f"[wifi-automanage:{reason}] {decoded_line}")
 
             return_code = await proc.wait()
             if return_code == 0:
-                print("Startup Wi-Fi auto-manage finished successfully.")
+                print(f"Wi-Fi auto-manage ({reason}) finished successfully.")
                 return
 
             print(
-                f"Startup Wi-Fi auto-manage attempt {attempt}/{STARTUP_WIFI_AUTOMANAGE_ATTEMPTS} "
+                f"Wi-Fi auto-manage ({reason}) attempt {attempt}/{attempts} "
                 f"failed with exit code {return_code}."
             )
         except Exception as e:
-            print(f"Startup Wi-Fi auto-manage attempt {attempt}/{STARTUP_WIFI_AUTOMANAGE_ATTEMPTS} failed to execute: {e}")
+            print(f"Wi-Fi auto-manage ({reason}) attempt {attempt}/{attempts} failed to execute: {e}")
 
-        if attempt < STARTUP_WIFI_AUTOMANAGE_ATTEMPTS and STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS > 0:
-            await asyncio.sleep(STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS)
+        if attempt < attempts and delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
 
-    print("Startup Wi-Fi auto-manage failed after all retry attempts.")
+    print(f"Wi-Fi auto-manage ({reason}) failed after all retry attempts.")
+
+
+async def _run_wifi_automanage_on_startup() -> None:
+    if not STARTUP_WIFI_AUTOMANAGE_ENABLED:
+        print("Startup Wi-Fi auto-manage is disabled.")
+        return
+
+    await _run_wifi_automanage(
+        reason="startup",
+        attempts=STARTUP_WIFI_AUTOMANAGE_ATTEMPTS,
+        delay_seconds=STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS,
+    )
 
 
 @app.on_event("startup")
@@ -1339,6 +1350,9 @@ async def set_wifi_interfaces(request: WifiInterfacesRequest):
         client_interface=client_interface,
         hotspot_interface=hotspot_interface,
     )
+
+    if client_interface != current_client or hotspot_interface != current_hotspot:
+        asyncio.create_task(_run_wifi_automanage(reason="interfaces-update", attempts=1, delay_seconds=0.0))
 
     return WifiInterfacesResponse(client_interface=client_interface, hotspot_interface=hotspot_interface)
 
