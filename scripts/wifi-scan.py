@@ -4,8 +4,36 @@ import re
 import json
 import sys
 import shutil
+import os
 
-def get_wifi_networks():
+DEFAULT_WIFI_INTERFACE = "wlan0"
+CONFIG_PATHS = [
+    "/opt/pinsdaemon/app/wifi_config.json",
+    "/etc/pins/wifi_config.json",
+    os.path.join(os.path.dirname(__file__), "../app/wifi_config.json"),
+]
+
+
+def get_scan_interface() -> str:
+    valid = re.compile(r"^[A-Za-z0-9._-]+$")
+
+    for path in CONFIG_PATHS:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            iface = data.get("client_interface") if isinstance(data, dict) else None
+            if isinstance(iface, str):
+                iface = iface.strip()
+                if valid.fullmatch(iface):
+                    return iface
+        except Exception:
+            continue
+
+    return DEFAULT_WIFI_INTERFACE
+
+def get_wifi_networks(scan_interface):
     wifi_networks = []
     
     # Check if nmcli is available
@@ -19,7 +47,7 @@ def get_wifi_networks():
         elif shutil.which("/usr/sbin/iwlist"):
             iwlist_path = "/usr/sbin/iwlist"
             
-        cmd = ["sudo", iwlist_path, "wlan0", "scan"]
+        cmd = ["sudo", iwlist_path, scan_interface, "scan"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
@@ -81,7 +109,7 @@ def get_wifi_networks():
 
 if __name__ == "__main__":
     try:
-        networks = get_wifi_networks()
+        networks = get_wifi_networks(get_scan_interface())
         print(json.dumps(networks, indent=2))
     except Exception as e:
         print(json.dumps({"error": str(e)}))

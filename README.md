@@ -184,7 +184,7 @@ Get a list of available Wi-Fi networks.
 Connect to a specific Wi-Fi network. If connection fails, it automatically reverts to Hotspot mode.
 
 Runtime behavior:
-- A NetworkManager dispatcher hook monitors wlan0 disconnect/change events.
+- A NetworkManager dispatcher hook monitors disconnect/change events on the configured client/hotspot interfaces.
 - It retries reconnection to the configured auto-connect SSID (default: 3 attempts, 5s backoff).
 - If retries fail, it enables the device hotspot automatically.
 

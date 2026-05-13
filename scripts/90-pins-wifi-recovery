@@ -4,7 +4,7 @@ set -euo pipefail
 IFACE="${1:-}"
 ACTION="${2:-}"
 
-# Run only for wlan0 lifecycle changes where recovery decisions make sense.
+# Run only for relevant lifecycle changes where recovery decisions make sense.
 case "$ACTION" in
     down|dhcp4-change|connectivity-change|reapply)
         ;;
@@ -13,16 +13,13 @@ case "$ACTION" in
         ;;
 esac
 
-if [[ "$IFACE" != "wlan0" ]]; then
-    exit 0
-fi
-
 LOCK_DIR="/run/pins-wifi-recovery.lock"
 STATE_FILE="/run/pins-wifi-recovery.failures"
 WIFI_CONFIG_FILE="/opt/pinsdaemon/app/wifi_config.json"
 WIFI_CONNECT_SCRIPT="/usr/local/bin/wifi-connect.sh"
 MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
 LOG_TAG="pins-wifi-recovery"
+DEFAULT_WIFI_INTERFACE="wlan0"
 
 MAX_RETRIES="${PINS_WIFI_RECOVERY_MAX_RETRIES:-3}"
 BACKOFF_SECONDS="${PINS_WIFI_RECOVERY_BACKOFF_SECONDS:-5}"
@@ -30,6 +27,54 @@ BACKOFF_SECONDS="${PINS_WIFI_RECOVERY_BACKOFF_SECONDS:-5}"
 log() {
     logger -t "$LOG_TAG" "$*"
 }
+
+read_configured_interfaces() {
+    python3 - "$WIFI_CONFIG_FILE" "$DEFAULT_WIFI_INTERFACE" <<'PY'
+import json
+import os
+import re
+import sys
+
+path = sys.argv[1]
+default_iface = sys.argv[2]
+valid = re.compile(r"^[A-Za-z0-9._-]+$")
+
+client = default_iface
+hotspot = default_iface
+
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            candidate_client = data.get("client_interface")
+            candidate_hotspot = data.get("hotspot_interface")
+            if isinstance(candidate_client, str):
+                candidate_client = candidate_client.strip()
+                if valid.fullmatch(candidate_client):
+                    client = candidate_client
+            if isinstance(candidate_hotspot, str):
+                candidate_hotspot = candidate_hotspot.strip()
+                if valid.fullmatch(candidate_hotspot):
+                    hotspot = candidate_hotspot
+    except Exception:
+        pass
+
+if not hotspot:
+    hotspot = client
+
+print(client)
+print(hotspot)
+PY
+}
+
+mapfile -t IFACES < <(read_configured_interfaces)
+CLIENT_IFACE="${IFACES[0]:-$DEFAULT_WIFI_INTERFACE}"
+HOTSPOT_IFACE="${IFACES[1]:-$CLIENT_IFACE}"
+
+if [[ "$IFACE" != "$CLIENT_IFACE" && "$IFACE" != "$HOTSPOT_IFACE" ]]; then
+    exit 0
+fi
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     exit 0
@@ -43,13 +88,13 @@ fi
 
 is_hotspot_active() {
     nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
-        | awk -F: '$2=="802-11-wireless" && $3=="wlan0" {print $1}' \
+        | awk -F: -v iface="$HOTSPOT_IFACE" '$2=="802-11-wireless" && $3==iface {print $1}' \
         | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
 }
 
 is_wifi_client_connected() {
     nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
-        | grep -qE '^wlan0:wifi:connected$'
+        | grep -qE "^${CLIENT_IFACE}:wifi:connected$"
 }
 
 read_autoconnect_config() {
@@ -127,8 +172,8 @@ TARGET_SSID="${CFG[1]:-}"
 TARGET_BAND="$(normalize_band "${CFG[2]:-}")"
 
 if [[ "$AUTOCONNECT_ENABLED" != "1" ]]; then
-    log "Wi-Fi disconnected and auto-connect disabled; enabling fallback hotspot"
-    "$WIFI_CONNECT_SCRIPT" --hotspot >/dev/null 2>&1 || log "Failed to enable fallback hotspot"
+    log "Wi-Fi disconnected on ${IFACE}; auto-connect disabled; enabling fallback hotspot on ${HOTSPOT_IFACE}"
+    "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1 || log "Failed to enable fallback hotspot"
     set_failures 0
     exit 0
 fi
@@ -158,7 +203,7 @@ if [[ "$FAILURES" -le "$MAX_RETRIES" ]]; then
     exit 0
 fi
 
-log "Wi-Fi reconnect failed after ${MAX_RETRIES} attempts; enabling fallback hotspot"
-"$WIFI_CONNECT_SCRIPT" --hotspot >/dev/null 2>&1 || log "Failed to enable fallback hotspot"
+log "Wi-Fi reconnect failed after ${MAX_RETRIES} attempts; enabling fallback hotspot on ${HOTSPOT_IFACE}"
+"$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1 || log "Failed to enable fallback hotspot"
 set_failures 0
 exit 0
