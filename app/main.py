@@ -95,7 +95,10 @@ AVAILABLE_PLUGIN_PACKAGES = [
 ]
 PROTECTED_PLUGIN_PACKAGES = {
     "pins-plugin-ninaapi",
+    "pins-plugin-ninaapi",
     "pins-plugin-touch-n-stars",
+    "pins-plugin-joko",
+    "pins-plugin-polaralignment"
 }
 ALLOWED_INDI_3RDPARTY_TYPES = {
     "filterwheel",
