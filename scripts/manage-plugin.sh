@@ -24,6 +24,8 @@ ALLOWED_PLUGINS=(
 PROTECTED_PLUGINS=(
     "pins-plugin-ninaapi"
     "pins-plugin-touch-n-stars"
+    "pins-plugin-polaralignment"
+    "pins-plugin-joko"
 )
 
 if [[ -z "$ACTION" || -z "$PACKAGE_NAME" ]]; then
