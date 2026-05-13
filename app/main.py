@@ -44,6 +44,11 @@ if not os.path.exists(DEFAULT_WIFI_SCAN):
     DEFAULT_WIFI_SCAN = os.path.join(os.path.dirname(__file__), "../scripts/wifi-scan.py")
 
 WIFI_SCAN_SCRIPT_PATH = os.getenv("WIFI_SCAN_SCRIPT_PATH", DEFAULT_WIFI_SCAN)
+DEFAULT_WIFI_AUTOMANAGE_SCRIPT = "/usr/local/bin/wifi-automanage.py"
+if not os.path.exists(DEFAULT_WIFI_AUTOMANAGE_SCRIPT):
+    DEFAULT_WIFI_AUTOMANAGE_SCRIPT = os.path.join(os.path.dirname(__file__), "../scripts/wifi-automanage.py")
+
+WIFI_AUTOMANAGE_SCRIPT_PATH = os.getenv("WIFI_AUTOMANAGE_SCRIPT_PATH", DEFAULT_WIFI_AUTOMANAGE_SCRIPT)
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
 FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-firmware.sh")
 INDI_INSTALL_SCRIPT_PATH = os.getenv("INDI_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-indi-package.sh")
@@ -56,6 +61,9 @@ if not os.path.exists(DEFAULT_REQUIRED_PACKAGES_SCRIPT):
     DEFAULT_REQUIRED_PACKAGES_SCRIPT = os.path.join(os.path.dirname(__file__), "../scripts/ensure-required-packages.sh")
 REQUIRED_PACKAGES_SCRIPT_PATH = os.getenv("REQUIRED_PACKAGES_SCRIPT_PATH", DEFAULT_REQUIRED_PACKAGES_SCRIPT)
 STARTUP_PACKAGE_CHECK_ENABLED = os.getenv("STARTUP_PACKAGE_CHECK_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+STARTUP_WIFI_AUTOMANAGE_ENABLED = os.getenv("STARTUP_WIFI_AUTOMANAGE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+STARTUP_WIFI_AUTOMANAGE_ATTEMPTS = max(1, int(os.getenv("STARTUP_WIFI_AUTOMANAGE_ATTEMPTS", "3")))
+STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS = max(0.0, float(os.getenv("STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS", "5")))
 FIRMWARE_STATE_FILE = os.getenv("FIRMWARE_STATE_FILE", "/opt/pinsdaemon/firmware.txt")
 FIRMWARE_UPLOAD_DIR = os.getenv("FIRMWARE_UPLOAD_DIR", "/tmp/pinsdaemon-firmware")
 FIRMWARE_ZIP_RE = re.compile(r"^firmware_(\d{8})_(\d{6})\.zip$", re.IGNORECASE)
@@ -792,9 +800,54 @@ async def _ensure_required_packages_on_startup() -> None:
         print(f"Startup required package check failed to execute: {e}")
 
 
+async def _run_wifi_automanage_on_startup() -> None:
+    if not STARTUP_WIFI_AUTOMANAGE_ENABLED:
+        print("Startup Wi-Fi auto-manage is disabled.")
+        return
+
+    if not os.path.exists(WIFI_AUTOMANAGE_SCRIPT_PATH):
+        print(f"Wi-Fi auto-manage script not found at {WIFI_AUTOMANAGE_SCRIPT_PATH}; skipping startup Wi-Fi auto-manage.")
+        return
+
+    print(f"Starting Wi-Fi auto-manage using {WIFI_AUTOMANAGE_SCRIPT_PATH}")
+    for attempt in range(1, STARTUP_WIFI_AUTOMANAGE_ATTEMPTS + 1):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", WIFI_AUTOMANAGE_SCRIPT_PATH,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                decoded_line = line.decode(errors="replace").rstrip()
+                if decoded_line:
+                    print(f"[startup-wifi-automanage] {decoded_line}")
+
+            return_code = await proc.wait()
+            if return_code == 0:
+                print("Startup Wi-Fi auto-manage finished successfully.")
+                return
+
+            print(
+                f"Startup Wi-Fi auto-manage attempt {attempt}/{STARTUP_WIFI_AUTOMANAGE_ATTEMPTS} "
+                f"failed with exit code {return_code}."
+            )
+        except Exception as e:
+            print(f"Startup Wi-Fi auto-manage attempt {attempt}/{STARTUP_WIFI_AUTOMANAGE_ATTEMPTS} failed to execute: {e}")
+
+        if attempt < STARTUP_WIFI_AUTOMANAGE_ATTEMPTS and STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS > 0:
+            await asyncio.sleep(STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS)
+
+    print("Startup Wi-Fi auto-manage failed after all retry attempts.")
+
+
 @app.on_event("startup")
 async def schedule_startup_tasks() -> None:
     asyncio.create_task(_ensure_required_packages_on_startup())
+    asyncio.create_task(_run_wifi_automanage_on_startup())
 
 @app.post("/upgrade", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def trigger_upgrade(request: UpgradeRequest):
