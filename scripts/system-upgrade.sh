@@ -4,6 +4,17 @@ set -e
 echo "Starting system upgrade..."
 ORIGINAL_ARGS=("$@")
 
+TARGET_KERNEL_VERSION="${PINS_TARGET_KERNEL_VERSION:-6.12.75-v8-16k+}"
+TARGET_RPI_UPDATE_HASH="${PINS_TARGET_RPI_UPDATE_HASH:-98655d3ccedba33aeadd0e550229f1496c5bf6f9}"
+KERNEL_PACKAGE_CANDIDATES=(
+    "raspberrypi-kernel"
+    "raspberrypi-bootloader"
+    "linux-image-rpi-v8"
+    "linux-image-rpi-v8-16k"
+    "linux-headers-rpi-v8"
+    "linux-headers-rpi-v8-16k"
+)
+
 # Default variables
 DRY_RUN=false
 JOB_ID=""
@@ -109,6 +120,51 @@ finalize_job_state() {
 
 trap finalize_job_state EXIT
 
+is_package_installed() {
+    local package_name="$1"
+    dpkg-query -W -f='${Status}' "$package_name" 2>/dev/null | grep -q "install ok installed"
+}
+
+hold_kernel_packages() {
+    local held_any=false
+    local package_name
+
+    for package_name in "${KERNEL_PACKAGE_CANDIDATES[@]}"; do
+        if is_package_installed "$package_name"; then
+            echo "Holding kernel package: $package_name"
+            apt-mark hold "$package_name" >/dev/null
+            held_any=true
+        fi
+    done
+
+    if [[ "$held_any" != "true" ]]; then
+        echo "No known kernel package candidates installed; skipping apt hold step."
+    fi
+}
+
+enforce_target_kernel_version() {
+    local running_kernel
+    running_kernel="$(uname -r 2>/dev/null || true)"
+
+    echo "Running kernel: ${running_kernel:-unknown}"
+    echo "Target kernel:  $TARGET_KERNEL_VERSION"
+
+    if [[ "$running_kernel" == "$TARGET_KERNEL_VERSION" ]]; then
+        echo "Kernel already matches target version."
+        return 0
+    fi
+
+    echo "Kernel mismatch detected. Enforcing pinned kernel with rpi-update $TARGET_RPI_UPDATE_HASH"
+
+    if ! command -v rpi-update >/dev/null 2>&1; then
+        echo "rpi-update not found. Installing..."
+        stdbuf -oL -eL apt-get install -y rpi-update
+    fi
+
+    SKIP_WARNING=1 stdbuf -oL -eL rpi-update "$TARGET_RPI_UPDATE_HASH"
+    echo "Pinned kernel files applied. Reboot required for kernel change to take effect."
+}
+
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -172,6 +228,10 @@ fi
 # Update package lists
 echo "Running apt update..."
 export DEBIAN_FRONTEND=noninteractive
+
+echo "Holding kernel-related packages to avoid unintended kernel upgrades..."
+hold_kernel_packages
+
 # frequent flush for logs
 stdbuf -oL -eL apt-get update
 
@@ -191,6 +251,9 @@ fi
 echo "Cleaning APT cache..."
 stdbuf -oL -eL apt-get clean
 stdbuf -oL -eL apt-get autoclean
+
+echo "Validating pinned kernel version..."
+enforce_target_kernel_version
 
 if [[ "$HAS_PACKAGE_UPDATES" == "true" ]]; then
     echo "Updates detected. Restarting pins service..."
