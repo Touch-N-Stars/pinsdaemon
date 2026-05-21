@@ -187,6 +187,59 @@ PY
     printf "%s" "$hotspot_password"
 }
 
+get_hotspot_band() {
+    if [ -f "$HOTSPOT_CONFIG_FILE" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$HOTSPOT_CONFIG_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(0)
+
+band = data.get("band")
+if not isinstance(band, str):
+    raise SystemExit(0)
+
+candidate = band.strip().lower()
+if candidate in {"2.4ghz", "bg"}:
+    print("bg")
+elif candidate in {"5ghz", "a"}:
+    print("a")
+PY
+    fi
+}
+
+get_hotspot_channel() {
+    if [ -f "$HOTSPOT_CONFIG_FILE" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$HOTSPOT_CONFIG_FILE" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception:
+    raise SystemExit(0)
+
+channel = data.get("channel")
+if isinstance(channel, bool):
+    raise SystemExit(0)
+try:
+    channel = int(channel)
+except Exception:
+    raise SystemExit(0)
+
+if channel > 0:
+    print(channel)
+PY
+    fi
+}
+
 enable_hotspot() {
     echo "Connection failed (or forcing hotspot). Re-enabling hotspot..."
 
@@ -217,6 +270,8 @@ enable_hotspot() {
 
     HOTSPOT_SSID="pins-$CPU_ID"
     HOTSPOT_PASSWORD="$(get_hotspot_password)"
+    HOTSPOT_BAND="$(get_hotspot_band)"
+    HOTSPOT_CHANNEL="$(get_hotspot_channel)"
 
     echo "Creating hotspot: $HOTSPOT_SSID"
 
@@ -260,6 +315,15 @@ enable_hotspot() {
                 nmcli connection modify "$conn" wifi-sec.key-mgmt wpa-psk || true
                 nmcli connection modify "$conn" wifi-sec.psk "$HOTSPOT_PASSWORD" || true
                 nmcli connection modify "$conn" 802-11-wireless.powersave 2 || true
+                if [ -n "$HOTSPOT_BAND" ]; then
+                    nmcli connection modify "$conn" 802-11-wireless.band "$HOTSPOT_BAND" || true
+                fi
+                if [ -n "$HOTSPOT_CHANNEL" ]; then
+                    nmcli connection modify "$conn" 802-11-wireless.channel "$HOTSPOT_CHANNEL" || true
+                fi
+                if [ -n "$HOTSPOT_BAND" ] || [ -n "$HOTSPOT_CHANNEL" ]; then
+                    nmcli connection up "$conn" ifname "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
+                fi
                 break
             fi
         done

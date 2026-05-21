@@ -245,24 +245,37 @@ Return whether device is connected to Wi-Fi and detect active band.
 
 ### 10. Hotspot Password
 
-Get hotspot password configuration status without exposing the password value.
+Get hotspot configuration status without exposing the password value.
 
 - **URL**: `GET /wifi/hotspot/password`
 - **Response**:
   ```json
   {
-    "configured": false,
-    "source": "default"
+    "configured": true,
+    "source": "configured",
+    "band": "2.4GHz",
+    "channel": 6,
+    "hotspotInterface": "wlan1",
+    "supportedChannels": {
+      "2.4GHz": [1, 6, 11],
+      "5GHz": [36, 40, 44, 48]
+    }
   }
   ```
 
-Update the default hotspot password used by hotspot mode.
+Alias endpoint for the same payload:
+
+- **URL**: `GET /wifi/hotspot/settings`
+
+Update hotspot settings used by hotspot mode.
 
 - **URL**: `POST /wifi/hotspot/password`
 - **Body**:
   ```json
   {
-    "password": "newstrongpass"
+    "password": "newstrongpass",
+    "band": "5GHz",
+    "channel": 44
   }
   ```
 - **Response**:
@@ -271,10 +284,16 @@ Update the default hotspot password used by hotspot mode.
     "status": "success",
     "message": "Hotspot default password updated",
     "configured": true,
-    "appliedToActiveHotspot": false
+    "appliedToActiveHotspot": false,
+    "band": "5GHz",
+    "channel": 44
   }
   ```
-- **Validation**: password must be 8-63 characters.
+- **Validation**: password must be 8-63 characters. `band` accepts `2.4GHz` or `5GHz` (also aliases `bg`/`a`). `channel` accepts any positive integer and is checked against adapter-reported supported channels when available.
+
+Alias endpoint for the same update behavior:
+
+- **URL**: `POST /wifi/hotspot/settings`
 
 ### 11. System Temperature
 

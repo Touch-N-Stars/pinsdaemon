@@ -17,7 +17,7 @@ from typing import Optional, List, Dict, Any
 from .auth import verify_token
 from .job_manager import job_manager, JobStatus
 from .wifi_config import load_wifi_config, save_wifi_config
-from .hotspot_config import load_hotspot_config, save_hotspot_password
+from .hotspot_config import load_hotspot_config, save_hotspot_settings
 
 app = FastAPI(title="System Update Daemon")
 
@@ -180,16 +180,24 @@ class WifiInterfacesResponse(BaseModel):
 
 class HotspotPasswordRequest(BaseModel):
     password: str
+    band: Optional[str] = None
+    channel: Optional[int] = None
 
 class HotspotPasswordStatusResponse(BaseModel):
     configured: bool
     source: str
+    band: Optional[str] = None
+    channel: Optional[int] = None
+    hotspotInterface: Optional[str] = None
+    supportedChannels: Dict[str, List[int]] = {}
 
 class HotspotPasswordUpdateResponse(BaseModel):
     status: str
     message: str
     configured: bool
     appliedToActiveHotspot: bool
+    band: Optional[str] = None
+    channel: Optional[int] = None
 
 
 class UpdatePackageStatus(BaseModel):
@@ -275,6 +283,107 @@ def _get_configured_wifi_interfaces() -> tuple[str, str]:
     client_interface = _sanitize_interface_name(config.get("client_interface")) or "wlan0"
     hotspot_interface = _sanitize_interface_name(config.get("hotspot_interface")) or client_interface
     return client_interface, hotspot_interface
+
+
+def _normalize_hotspot_band(band: Optional[str]) -> Optional[str]:
+    if band is None:
+        return None
+    candidate = band.strip()
+    if not candidate:
+        return None
+
+    aliases = {
+        "2.4ghz": "2.4GHz",
+        "bg": "2.4GHz",
+        "5ghz": "5GHz",
+        "a": "5GHz",
+    }
+    normalized = aliases.get(candidate.lower(), candidate)
+    if normalized not in {"2.4GHz", "5GHz"}:
+        raise HTTPException(status_code=400, detail="Hotspot band must be one of: 2.4GHz, 5GHz")
+    return normalized
+
+
+def _validate_hotspot_band_channel(
+    band: Optional[str],
+    channel: Optional[int],
+) -> tuple[Optional[str], Optional[int]]:
+    normalized_band = _normalize_hotspot_band(band)
+
+    if channel is None:
+        return normalized_band, None
+    if isinstance(channel, bool):
+        raise HTTPException(status_code=400, detail="Hotspot channel must be an integer")
+    if channel <= 0:
+        raise HTTPException(status_code=400, detail="Hotspot channel must be greater than 0")
+
+    return normalized_band, channel
+
+
+async def _read_hotspot_supported_channels(interface: str) -> Dict[str, List[int]]:
+    supported: Dict[str, set[int]] = {
+        "2.4GHz": set(),
+        "5GHz": set(),
+        "6GHz": set(),
+        "60GHz": set(),
+    }
+
+    dev_proc = await asyncio.create_subprocess_exec(
+        "iw",
+        "dev",
+        interface,
+        "info",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    dev_stdout, _ = await dev_proc.communicate()
+    if dev_proc.returncode != 0:
+        return {"2.4GHz": [], "5GHz": [], "6GHz": [], "60GHz": []}
+
+    wiphy_match = re.search(r"\bwiphy\s+(\d+)\b", dev_stdout.decode(errors="replace"))
+    if not wiphy_match:
+        return {"2.4GHz": [], "5GHz": [], "6GHz": [], "60GHz": []}
+
+    phy_name = f"phy{wiphy_match.group(1)}"
+    phy_proc = await asyncio.create_subprocess_exec(
+        "iw",
+        "phy",
+        phy_name,
+        "channels",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    phy_stdout, _ = await phy_proc.communicate()
+    if phy_proc.returncode != 0:
+        return {"2.4GHz": [], "5GHz": [], "6GHz": [], "60GHz": []}
+
+    for raw_line in phy_stdout.decode(errors="replace").splitlines():
+        line = raw_line.strip()
+        match = re.search(r"\*\s*(\d+)\s+MHz\s+\[(\d+)\](.*)$", line)
+        if not match:
+            continue
+
+        frequency_mhz = int(match.group(1))
+        channel = int(match.group(2))
+        flags = match.group(3).lower()
+        if "disabled" in flags:
+            continue
+
+        if frequency_mhz < 3000:
+            supported["2.4GHz"].add(channel)
+        elif frequency_mhz < 5925:
+            supported["5GHz"].add(channel)
+        elif frequency_mhz < 7125:
+            supported["6GHz"].add(channel)
+        elif 57000 <= frequency_mhz <= 71000:
+            supported["60GHz"].add(channel)
+
+    return {
+        "2.4GHz": sorted(supported["2.4GHz"]),
+        "5GHz": sorted(supported["5GHz"]),
+        "6GHz": sorted(supported["6GHz"]),
+        "60GHz": sorted(supported["60GHz"]),
+    }
 
 
 def _parse_nmcli_row(line: str) -> list[str]:
@@ -1517,7 +1626,16 @@ async def get_wifi_auto_connect():
 @app.get("/wifi/hotspot/password", response_model=HotspotPasswordStatusResponse, dependencies=[Depends(verify_token)])
 async def get_hotspot_password():
     config = load_hotspot_config()
-    return HotspotPasswordStatusResponse(configured=(config["source"] == "configured"), source=config["source"])
+    _, hotspot_interface = _get_configured_wifi_interfaces()
+    supported_channels = await _read_hotspot_supported_channels(hotspot_interface)
+    return HotspotPasswordStatusResponse(
+        configured=(config["source"] == "configured"),
+        source=config["source"],
+        band=config.get("band"),
+        channel=config.get("channel"),
+        hotspotInterface=hotspot_interface,
+        supportedChannels=supported_channels,
+    )
 
 
 @app.post("/wifi/hotspot/password", response_model=HotspotPasswordUpdateResponse, dependencies=[Depends(verify_token)])
@@ -1526,10 +1644,21 @@ async def set_hotspot_password(request: HotspotPasswordRequest):
     if len(password) < 8 or len(password) > 63:
         raise HTTPException(status_code=400, detail="Hotspot password must be between 8 and 63 characters")
 
-    save_hotspot_password(password)
+    normalized_band, normalized_channel = _validate_hotspot_band_channel(request.band, request.channel)
+
+    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    supported_channels = await _read_hotspot_supported_channels(hotspot_interface)
+    if normalized_channel is not None and normalized_band is not None:
+        band_channels = supported_channels.get(normalized_band, [])
+        if band_channels and normalized_channel not in band_channels:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Channel {normalized_channel} is not supported on {hotspot_interface} for {normalized_band}",
+            )
+
+    save_hotspot_settings(password=password, band=normalized_band, channel=normalized_channel)
 
     applied_now = False
-    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
     if await is_hotspot_active_on_interface(hotspot_interface):
         cmd = [
             "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
@@ -1556,7 +1685,19 @@ async def set_hotspot_password(request: HotspotPasswordRequest):
         message="Hotspot default password updated and applied" if applied_now else "Hotspot default password updated",
         configured=True,
         appliedToActiveHotspot=applied_now,
+        band=normalized_band,
+        channel=normalized_channel,
     )
+
+
+@app.get("/wifi/hotspot/settings", response_model=HotspotPasswordStatusResponse, dependencies=[Depends(verify_token)])
+async def get_hotspot_settings():
+    return await get_hotspot_password()
+
+
+@app.post("/wifi/hotspot/settings", response_model=HotspotPasswordUpdateResponse, dependencies=[Depends(verify_token)])
+async def set_hotspot_settings(request: HotspotPasswordRequest):
+    return await set_hotspot_password(request)
 
 
 @app.post("/wifi/auto-connect", dependencies=[Depends(verify_token)])
