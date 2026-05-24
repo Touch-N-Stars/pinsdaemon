@@ -5,11 +5,16 @@ import asyncio
 import uuid
 import re
 import fnmatch
+import tempfile
+import shutil
+import zipfile
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
@@ -110,6 +115,13 @@ ALLOWED_INDI_3RDPARTY_TYPES = {
     "weather",
 }
 UPGRADE_LAST_JOB_FILE = os.getenv("UPGRADE_LAST_JOB_FILE", "/opt/pinsdaemon/last-upgrade-job.json")
+DEFAULT_DIAGNOSTICS_SCRIPT = "/usr/local/bin/collect-diagnostics.sh"
+if not os.path.exists(DEFAULT_DIAGNOSTICS_SCRIPT):
+    DEFAULT_DIAGNOSTICS_SCRIPT = os.path.join(os.path.dirname(__file__), "../scripts/collect-diagnostics.sh")
+DIAGNOSTICS_SCRIPT_PATH = os.getenv("DIAGNOSTICS_SCRIPT_PATH", DEFAULT_DIAGNOSTICS_SCRIPT)
+DIAGNOSTICS_WORK_DIR = os.getenv("DIAGNOSTICS_WORK_DIR", "/tmp/pinsdaemon-diagnostics")
+DIAGNOSTICS_COLLECTION_TIMEOUT_SECONDS = max(30, int(os.getenv("DIAGNOSTICS_COLLECTION_TIMEOUT_SECONDS", "900")))
+DIAGNOSTICS_RETENTION_SECONDS = max(300, int(os.getenv("DIAGNOSTICS_RETENTION_SECONDS", "86400")))
 
 class UpgradeRequest(BaseModel):
     dryRun: bool = False
@@ -1912,6 +1924,51 @@ class DhcpClientsResponse(BaseModel):
     clients: List[DhcpClient]
 
 
+class DiagnosticsCollectRequest(BaseModel):
+    includePinsJournal: bool = True
+    includeApiJournal: bool = True
+    includeUsb: bool = True
+    includeDmesg: bool = True
+    includeSystemInfo: bool = True
+    includeNetworkInfo: bool = True
+    includeKernelModules: bool = True
+    journalLines: int = 2000
+    dmesgLines: int = 4000
+
+
+class DiagnosticsSectionOption(BaseModel):
+    key: str
+    label: str
+    description: str
+    defaultEnabled: bool
+
+
+class DiagnosticsOptionsResponse(BaseModel):
+    sections: List[DiagnosticsSectionOption]
+    journalLinesDefault: int
+    dmesgLinesDefault: int
+
+
+class DiagnosticsArchiveStartResponse(BaseModel):
+    archiveId: str
+    status: str
+    pollUrl: str
+    downloadUrl: str
+
+
+class DiagnosticsArchiveStatusResponse(BaseModel):
+    archiveId: str
+    status: str
+    startedAt: float
+    finishedAt: Optional[float] = None
+    expiresAt: Optional[float] = None
+    error: Optional[str] = None
+    downloadUrl: Optional[str] = None
+
+
+DIAGNOSTICS_ARCHIVE_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
 _DNSMASQ_LEASES_CANDIDATES = [
     "/var/lib/NetworkManager/dnsmasq-wlan0.leases",
     "/var/lib/NetworkManager/dnsmasq-wlan1.leases",
@@ -1966,4 +2023,289 @@ async def get_dhcp_clients():
     if errors:
         raise HTTPException(status_code=500, detail="Could not read any DHCP lease file: " + "; ".join(errors))
     return DhcpClientsResponse(clients=[])
+
+
+def _cleanup_directory(path: str) -> None:
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _diagnostics_download_url(archive_id: str) -> str:
+    return f"/diagnostics/archive/{archive_id}/download"
+
+
+def _prune_expired_diagnostics_jobs() -> None:
+    now = time.time()
+    expired_ids: list[str] = []
+    for archive_id, job in DIAGNOSTICS_ARCHIVE_JOBS.items():
+        expires_at = job.get("expiresAt")
+        if isinstance(expires_at, (int, float)) and expires_at <= now:
+            expired_ids.append(archive_id)
+
+    for archive_id in expired_ids:
+        job = DIAGNOSTICS_ARCHIVE_JOBS.pop(archive_id, None)
+        if not job:
+            continue
+        work_dir = job.get("workDir")
+        if isinstance(work_dir, str) and work_dir:
+            _cleanup_directory(work_dir)
+
+
+def _validate_diagnostics_request(request: DiagnosticsCollectRequest) -> None:
+    if request.journalLines < 100 or request.journalLines > 50000:
+        raise HTTPException(status_code=400, detail="journalLines must be between 100 and 50000")
+    if request.dmesgLines < 100 or request.dmesgLines > 50000:
+        raise HTTPException(status_code=400, detail="dmesgLines must be between 100 and 50000")
+
+    if not any([
+        request.includePinsJournal,
+        request.includeApiJournal,
+        request.includeUsb,
+        request.includeDmesg,
+        request.includeSystemInfo,
+        request.includeNetworkInfo,
+        request.includeKernelModules,
+    ]):
+        raise HTTPException(status_code=400, detail="At least one diagnostics section must be enabled")
+
+
+def _diagnostics_status_response_from_job(job: Dict[str, Any]) -> DiagnosticsArchiveStatusResponse:
+    status = str(job.get("status", "unknown"))
+    archive_id = str(job.get("archiveId", ""))
+    started_at = float(job.get("startedAt", time.time()))
+    finished_at_raw = job.get("finishedAt")
+    finished_at = float(finished_at_raw) if isinstance(finished_at_raw, (int, float)) else None
+    expires_at_raw = job.get("expiresAt")
+    expires_at = float(expires_at_raw) if isinstance(expires_at_raw, (int, float)) else None
+    error = str(job.get("error")) if job.get("error") else None
+    download_url = _diagnostics_download_url(archive_id) if status == "success" else None
+    return DiagnosticsArchiveStatusResponse(
+        archiveId=archive_id,
+        status=status,
+        startedAt=started_at,
+        finishedAt=finished_at,
+        expiresAt=expires_at,
+        error=error,
+        downloadUrl=download_url,
+    )
+
+
+async def _run_diagnostics_archive_job(archive_id: str) -> None:
+    job = DIAGNOSTICS_ARCHIVE_JOBS.get(archive_id)
+    if not job:
+        return
+
+    job["status"] = "running"
+    raw_dir = job["rawDir"]
+    command = job["command"]
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=DIAGNOSTICS_COLLECTION_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        job["status"] = "failed"
+        job["error"] = "Diagnostics collection timed out"
+        job["finishedAt"] = time.time()
+        job["expiresAt"] = time.time() + DIAGNOSTICS_RETENTION_SECONDS
+        return
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = f"Diagnostics collection failed: {exc}"
+        job["finishedAt"] = time.time()
+        job["expiresAt"] = time.time() + DIAGNOSTICS_RETENTION_SECONDS
+        return
+
+    if proc.returncode != 0:
+        error_text = stderr.decode(errors="replace").strip() or stdout.decode(errors="replace").strip() or "unknown error"
+        job["status"] = "failed"
+        job["error"] = f"Diagnostics collector returned {proc.returncode}: {error_text}"
+        job["finishedAt"] = time.time()
+        job["expiresAt"] = time.time() + DIAGNOSTICS_RETENTION_SECONDS
+        return
+
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    archive_name = f"pins-diagnostics-{timestamp}.zip"
+    archive_path = os.path.join(job["workDir"], archive_name)
+
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for root, _, files in os.walk(raw_dir):
+                for file_name in sorted(files):
+                    source_path = os.path.join(root, file_name)
+                    archive_path_name = os.path.relpath(source_path, raw_dir)
+                    archive.write(source_path, archive_path_name)
+    except Exception as exc:
+        job["status"] = "failed"
+        job["error"] = f"Failed to build diagnostics archive: {exc}"
+        job["finishedAt"] = time.time()
+        job["expiresAt"] = time.time() + DIAGNOSTICS_RETENTION_SECONDS
+        return
+
+    job["archiveName"] = archive_name
+    job["archivePath"] = archive_path
+    job["status"] = "success"
+    job["finishedAt"] = time.time()
+    job["expiresAt"] = time.time() + DIAGNOSTICS_RETENTION_SECONDS
+
+
+def _build_diagnostics_command(request: DiagnosticsCollectRequest, output_dir: str) -> list[str]:
+    cmd = [
+        "sudo", "-n", DIAGNOSTICS_SCRIPT_PATH,
+        "--output-dir", output_dir,
+        "--journal-lines", str(request.journalLines),
+        "--dmesg-lines", str(request.dmesgLines),
+    ]
+
+    if not request.includePinsJournal:
+        cmd.append("--no-pins-journal")
+    if not request.includeApiJournal:
+        cmd.append("--no-api-journal")
+    if not request.includeUsb:
+        cmd.append("--no-usb")
+    if not request.includeDmesg:
+        cmd.append("--no-dmesg")
+    if not request.includeSystemInfo:
+        cmd.append("--no-system-info")
+    if not request.includeNetworkInfo:
+        cmd.append("--no-network-info")
+    if not request.includeKernelModules:
+        cmd.append("--no-kernel-modules")
+
+    return cmd
+
+
+@app.get("/diagnostics/options", response_model=DiagnosticsOptionsResponse, dependencies=[Depends(verify_token)])
+async def get_diagnostics_options():
+    return DiagnosticsOptionsResponse(
+        sections=[
+            DiagnosticsSectionOption(
+                key="includePinsJournal",
+                label="PINS journal",
+                description="Collects journalctl logs from pins service units",
+                defaultEnabled=True,
+            ),
+            DiagnosticsSectionOption(
+                key="includeApiJournal",
+                label="API journal",
+                description="Collects journalctl logs from sysupdate-api service",
+                defaultEnabled=True,
+            ),
+            DiagnosticsSectionOption(
+                key="includeUsb",
+                label="USB device inventory",
+                description="Collects lsusb and usb topology information",
+                defaultEnabled=True,
+            ),
+            DiagnosticsSectionOption(
+                key="includeDmesg",
+                label="Kernel ring buffer",
+                description="Collects dmesg output including USB-related kernel lines",
+                defaultEnabled=True,
+            ),
+            DiagnosticsSectionOption(
+                key="includeSystemInfo",
+                label="System information",
+                description="Collects date, uptime, OS info and selected service states",
+                defaultEnabled=True,
+            ),
+            DiagnosticsSectionOption(
+                key="includeNetworkInfo",
+                label="Network information",
+                description="Collects nmcli, ip and rfkill diagnostic information",
+                defaultEnabled=True,
+            ),
+            DiagnosticsSectionOption(
+                key="includeKernelModules",
+                label="Kernel modules",
+                description="Collects lsmod output",
+                defaultEnabled=True,
+            ),
+        ],
+        journalLinesDefault=2000,
+        dmesgLinesDefault=4000,
+    )
+
+
+@app.post("/diagnostics/archive/start", response_model=DiagnosticsArchiveStartResponse, status_code=202, dependencies=[Depends(verify_token)])
+async def start_diagnostics_archive(request: DiagnosticsCollectRequest):
+    _validate_diagnostics_request(request)
+    _prune_expired_diagnostics_jobs()
+
+    os.makedirs(DIAGNOSTICS_WORK_DIR, exist_ok=True)
+    archive_id = str(uuid.uuid4())
+    work_dir = tempfile.mkdtemp(prefix=f"diag-{archive_id[:8]}-", dir=DIAGNOSTICS_WORK_DIR)
+    raw_dir = os.path.join(work_dir, "raw")
+    os.makedirs(raw_dir, exist_ok=True)
+
+    command = _build_diagnostics_command(request, raw_dir)
+
+    DIAGNOSTICS_ARCHIVE_JOBS[archive_id] = {
+        "archiveId": archive_id,
+        "status": "queued",
+        "startedAt": time.time(),
+        "finishedAt": None,
+        "expiresAt": None,
+        "error": None,
+        "workDir": work_dir,
+        "rawDir": raw_dir,
+        "archivePath": None,
+        "archiveName": None,
+        "command": command,
+    }
+
+    asyncio.create_task(_run_diagnostics_archive_job(archive_id))
+
+    return DiagnosticsArchiveStartResponse(
+        archiveId=archive_id,
+        status="queued",
+        pollUrl=f"/diagnostics/archive/{archive_id}",
+        downloadUrl=_diagnostics_download_url(archive_id),
+    )
+
+
+@app.post("/diagnostics/archive", response_model=DiagnosticsArchiveStartResponse, status_code=202, dependencies=[Depends(verify_token)])
+async def create_diagnostics_archive(request: DiagnosticsCollectRequest):
+    # Backward-compatible alias: now returns a start response instead of blocking until ZIP is ready.
+    return await start_diagnostics_archive(request)
+
+
+@app.get("/diagnostics/archive/{archive_id}", response_model=DiagnosticsArchiveStatusResponse, dependencies=[Depends(verify_token)])
+async def get_diagnostics_archive_status(archive_id: str):
+    _prune_expired_diagnostics_jobs()
+    job = DIAGNOSTICS_ARCHIVE_JOBS.get(archive_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Diagnostics archive job not found")
+    return _diagnostics_status_response_from_job(job)
+
+
+@app.get("/diagnostics/archive/{archive_id}/download", dependencies=[Depends(verify_token)])
+async def download_diagnostics_archive(archive_id: str):
+    _prune_expired_diagnostics_jobs()
+    job = DIAGNOSTICS_ARCHIVE_JOBS.get(archive_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Diagnostics archive job not found")
+
+    status = job.get("status")
+    if status in {"queued", "running"}:
+        raise HTTPException(status_code=409, detail="Diagnostics archive is still being prepared")
+    if status == "failed":
+        raise HTTPException(status_code=500, detail=job.get("error") or "Diagnostics archive preparation failed")
+
+    archive_path = job.get("archivePath")
+    archive_name = job.get("archiveName")
+    if not isinstance(archive_path, str) or not archive_path or not os.path.exists(archive_path):
+        raise HTTPException(status_code=404, detail="Diagnostics archive file not found")
+
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=archive_name or f"pins-diagnostics-{archive_id}.zip",
+    )
 

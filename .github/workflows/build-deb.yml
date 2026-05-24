@@ -45,6 +45,7 @@ jobs:
         cp scripts/wifi-connect.sh build/usr/local/bin/
         cp scripts/wifi-automanage.py build/usr/local/bin/
         cp scripts/wifi-scan.py build/usr/local/bin/
+        cp scripts/collect-diagnostics.sh build/usr/local/bin/
 
         # NetworkManager runtime recovery hook
         cp scripts/90-pins-wifi-recovery build/etc/NetworkManager/dispatcher.d/

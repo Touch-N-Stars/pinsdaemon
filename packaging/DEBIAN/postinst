@@ -62,6 +62,11 @@ if [ -f "/usr/local/bin/wifi-automanage.py" ]; then
     chmod 755 /usr/local/bin/wifi-automanage.py
 fi
 
+if [ -f "/usr/local/bin/collect-diagnostics.sh" ]; then
+    chown root:root /usr/local/bin/collect-diagnostics.sh
+    chmod 755 /usr/local/bin/collect-diagnostics.sh
+fi
+
 if [ -f "/home/pi/pins-scripts/hotspot.sh" ]; then
     chown pi:pi /home/pi/pins-scripts/hotspot.sh
     chmod 755 /home/pi/pins-scripts/hotspot.sh

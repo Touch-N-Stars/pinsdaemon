@@ -328,6 +328,91 @@ Alias endpoint for the same update behavior:
   ```
 - **Response**: `JobResponse` object.
 
+### Diagnostics Archive
+
+Expose selectable troubleshooting bundles for GUI checkboxes and support team debugging.
+
+- **URL**: `GET /diagnostics/options`
+- **Response**:
+  ```json
+  {
+    "sections": [
+      {
+        "key": "includePinsJournal",
+        "label": "PINS journal",
+        "description": "Collects journalctl logs from pins service units",
+        "defaultEnabled": true
+      },
+      {
+        "key": "includeUsb",
+        "label": "USB device inventory",
+        "description": "Collects lsusb and usb topology information",
+        "defaultEnabled": true
+      }
+    ],
+    "journalLinesDefault": 2000,
+    "dmesgLinesDefault": 4000
+  }
+  ```
+
+- **URL**: `POST /diagnostics/archive/start`
+- **Body**:
+  ```json
+  {
+    "includePinsJournal": true,
+    "includeApiJournal": true,
+    "includeUsb": true,
+    "includeDmesg": true,
+    "includeSystemInfo": true,
+    "includeNetworkInfo": true,
+    "includeKernelModules": true,
+    "journalLines": 2000,
+    "dmesgLines": 4000
+  }
+  ```
+- **Response** (`202 Accepted`):
+  ```json
+  {
+    "archiveId": "e6f96b6d-6f45-4c38-81c4-f778d2af8d83",
+    "status": "queued",
+    "pollUrl": "/diagnostics/archive/e6f96b6d-6f45-4c38-81c4-f778d2af8d83",
+    "downloadUrl": "/diagnostics/archive/e6f96b6d-6f45-4c38-81c4-f778d2af8d83/download"
+  }
+  ```
+
+Backward-compatible alias (same start behavior):
+
+- **URL**: `POST /diagnostics/archive`
+
+Poll status:
+
+- **URL**: `GET /diagnostics/archive/{archiveId}`
+- **Response**:
+  ```json
+  {
+    "archiveId": "e6f96b6d-6f45-4c38-81c4-f778d2af8d83",
+    "status": "running",
+    "startedAt": 1760000000.0,
+    "finishedAt": null,
+    "expiresAt": null,
+    "error": null,
+    "downloadUrl": null
+  }
+  ```
+
+Download archive when status is `success`:
+
+- **URL**: `GET /diagnostics/archive/{archiveId}/download`
+- **Response**: `application/zip` file download (`pins-diagnostics-YYYYMMDD_HHMMSS.zip`)
+
+The ZIP contains selected troubleshooting data such as:
+
+- `journalctl -u pins` and `journalctl -u sysupdate-api` logs
+- `lsusb`, `lsusb -t`, `usb-devices`
+- `dmesg` tail and USB-focused dmesg filters
+- `nmcli`, `ip`, `rfkill`, and `iw` outputs
+- basic system details (`uname`, `os-release`, `timedatectl`, service status)
+
 ### 13. Check Updates
 
 Check whether updates are available for a whitelist of relevant packages.
