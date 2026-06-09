@@ -57,6 +57,17 @@ WIFI_AUTOMANAGE_SCRIPT_PATH = os.getenv("WIFI_AUTOMANAGE_SCRIPT_PATH", DEFAULT_W
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
 FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-firmware.sh")
 INDI_INSTALL_SCRIPT_PATH = os.getenv("INDI_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-indi-package.sh")
+DEFAULT_ASTAP_STAR_DATABASE_INSTALL_SCRIPT = "/usr/local/bin/install-astap-star-database.sh"
+if not os.path.exists(DEFAULT_ASTAP_STAR_DATABASE_INSTALL_SCRIPT):
+    DEFAULT_ASTAP_STAR_DATABASE_INSTALL_SCRIPT = os.path.join(
+        os.path.dirname(__file__), "../scripts/install-astap-star-database.sh"
+    )
+ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH = os.getenv(
+    "ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH", DEFAULT_ASTAP_STAR_DATABASE_INSTALL_SCRIPT
+)
+ASTAP_STAR_DATABASE_STATE_FILE = os.getenv(
+    "ASTAP_STAR_DATABASE_STATE_FILE", "/opt/pinsdaemon/astap-star-databases.json"
+)
 DEFAULT_PLUGIN_MANAGE_SCRIPT = "/usr/local/bin/manage-plugin.sh"
 if not os.path.exists(DEFAULT_PLUGIN_MANAGE_SCRIPT):
     DEFAULT_PLUGIN_MANAGE_SCRIPT = os.path.join(os.path.dirname(__file__), "../scripts/manage-plugin.sh")
@@ -113,6 +124,35 @@ ALLOWED_INDI_3RDPARTY_TYPES = {
     "switches",
     "telescope",
     "weather",
+}
+ASTAP_STAR_DATABASES = [
+    {
+        "databaseId": "D50",
+        "label": "D50",
+        "description": "Large star database",
+        "downloadUrl": "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download",
+    },
+    {
+        "databaseId": "D05",
+        "label": "D05",
+        "description": "Smaller star database",
+        "downloadUrl": "https://sourceforge.net/projects/astap-program/files/star_databases/d05_star_database.deb/download",
+    },
+    {
+        "databaseId": "G05",
+        "label": "G05",
+        "description": "Wide field star database",
+        "downloadUrl": "https://sourceforge.net/projects/astap-program/files/star_databases/g05_star_database.deb/download",
+    },
+    {
+        "databaseId": "W08",
+        "label": "W08",
+        "description": "Very wide field star database",
+        "downloadUrl": "https://sourceforge.net/projects/astap-program/files/star_databases/w08_star_database_mag08_astap.deb/download",
+    },
+]
+ASTAP_STAR_DATABASES_BY_ID = {
+    db["databaseId"]: db for db in ASTAP_STAR_DATABASES
 }
 UPGRADE_LAST_JOB_FILE = os.getenv("UPGRADE_LAST_JOB_FILE", "/opt/pinsdaemon/last-upgrade-job.json")
 DEFAULT_DIAGNOSTICS_SCRIPT = "/usr/local/bin/collect-diagnostics.sh"
@@ -247,6 +287,28 @@ class IndiPackageInstallRequest(BaseModel):
     assetName: str
     label: Optional[str] = None
     type: Optional[str] = None
+
+
+class AstapStarDatabaseInfo(BaseModel):
+    databaseId: str
+    label: str
+    description: str
+    downloadUrl: str
+    installed: bool
+    installedPackage: Optional[str] = None
+    installedVersion: Optional[str] = None
+
+
+class AstapStarDatabasesResponse(BaseModel):
+    checkedAt: str
+    onlyNotInstalled: bool
+    packages: List[AstapStarDatabaseInfo]
+
+
+class AstapStarDatabaseInstallRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    databaseId: str
 
 
 class PluginInfo(BaseModel):
@@ -836,6 +898,126 @@ def _normalize_optional_text(value: Optional[str], field_name: str) -> Optional[
     return candidate
 
 
+def _normalize_astap_star_database_id(value: str) -> str:
+    candidate = value.strip().upper()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="databaseId is required")
+    if candidate not in ASTAP_STAR_DATABASES_BY_ID:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported ASTAP star database: {value}. Allowed: {', '.join(ASTAP_STAR_DATABASES_BY_ID.keys())}",
+        )
+    return candidate
+
+
+def _read_astap_star_database_state() -> dict[str, dict[str, str]]:
+    if not os.path.exists(ASTAP_STAR_DATABASE_STATE_FILE):
+        return {}
+
+    try:
+        with open(ASTAP_STAR_DATABASE_STATE_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    raw_databases = payload.get("databases")
+    if not isinstance(raw_databases, dict):
+        return {}
+
+    normalized: dict[str, dict[str, str]] = {}
+    for database_id, raw_entry in raw_databases.items():
+        if not isinstance(database_id, str) or not isinstance(raw_entry, dict):
+            continue
+
+        package_name = raw_entry.get("packageName")
+        if not isinstance(package_name, str):
+            continue
+
+        package_name = package_name.strip()
+        if not package_name:
+            continue
+
+        normalized[database_id.strip().upper()] = {"packageName": package_name}
+
+    return normalized
+
+
+def _find_astap_package_candidates(database_id: str, installed_versions: dict[str, str]) -> list[str]:
+    marker = database_id.lower()
+    candidates: list[str] = []
+
+    for package_name in installed_versions.keys():
+        normalized = package_name.lower()
+        if marker not in normalized:
+            continue
+        if "database" not in normalized and "star" not in normalized and "astap" not in normalized:
+            continue
+        candidates.append(package_name)
+
+    return sorted(candidates)
+
+
+async def _build_astap_star_databases(
+    only_not_installed: bool,
+    name_filter: Optional[str],
+) -> list[AstapStarDatabaseInfo]:
+    installed_versions = await _get_installed_package_versions()
+    state_by_database = _read_astap_star_database_state()
+
+    query = (name_filter or "").strip().lower()
+    result: list[AstapStarDatabaseInfo] = []
+
+    for database in ASTAP_STAR_DATABASES:
+        database_id = database["databaseId"]
+        label = database["label"]
+        description = database["description"]
+
+        if query:
+            searchable = f"{database_id} {label} {description}".lower()
+            if query not in searchable:
+                continue
+
+        installed = False
+        installed_package: Optional[str] = None
+        installed_version: Optional[str] = None
+
+        state_entry = state_by_database.get(database_id)
+        if state_entry:
+            state_package = state_entry.get("packageName")
+            if state_package:
+                installed_package = state_package
+                installed_version = installed_versions.get(state_package)
+                installed = installed_version is not None
+
+        if not installed:
+            for candidate in _find_astap_package_candidates(database_id, installed_versions):
+                installed_package = candidate
+                installed_version = installed_versions.get(candidate)
+                installed = installed_version is not None
+                if installed:
+                    break
+
+        if only_not_installed and installed:
+            continue
+
+        result.append(
+            AstapStarDatabaseInfo(
+                databaseId=database_id,
+                label=label,
+                description=description,
+                downloadUrl=database["downloadUrl"],
+                installed=installed,
+                installedPackage=installed_package,
+                installedVersion=installed_version,
+            )
+        )
+
+    return result
+
+
 def _write_last_upgrade_job_state(payload: Dict[str, Any]) -> None:
     try:
         state_dir = os.path.dirname(UPGRADE_LAST_JOB_FILE)
@@ -1078,6 +1260,48 @@ async def list_indi3rdparty_packages(onlyNotInstalled: bool = False, q: Optional
 
     checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     return IndiPackagesResponse(checkedAt=checked_at, onlyNotInstalled=onlyNotInstalled, packages=packages)
+
+
+@app.get("/packages/astap/stardatabases", response_model=AstapStarDatabasesResponse, dependencies=[Depends(verify_token)])
+async def list_astap_star_databases(onlyNotInstalled: bool = True, q: Optional[str] = None):
+    try:
+        packages = await _build_astap_star_databases(only_not_installed=onlyNotInstalled, name_filter=q)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build ASTAP package list: {e}")
+
+    checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    return AstapStarDatabasesResponse(checkedAt=checked_at, onlyNotInstalled=onlyNotInstalled, packages=packages)
+
+
+@app.post("/packages/astap/stardatabases/install", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def install_astap_star_database(request: AstapStarDatabaseInstallRequest):
+    database_id = _normalize_astap_star_database_id(request.databaseId)
+
+    if not os.path.exists(ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH):
+        raise HTTPException(
+            status_code=500,
+            detail=f"ASTAP installer script not found at {ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH}",
+        )
+
+    available = await _build_astap_star_databases(only_not_installed=False, name_filter=None)
+    selected = next((package for package in available if package.databaseId == database_id), None)
+    if selected and selected.installed:
+        raise HTTPException(status_code=409, detail=f"ASTAP star database {database_id} is already installed")
+
+    cmd = ["sudo", "-n", ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH, database_id]
+    job_id = await job_manager.start_job(cmd)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Failed to create ASTAP install job")
+
+    return JobResponse(
+        jobId=job.id,
+        status=job.status,
+        exitCode=job.exit_code,
+        startedAt=job.created_at,
+        finishedAt=job.finished_at,
+        command=job.command,
+    )
 
 
 @app.get("/plugins", response_model=PluginsResponse, dependencies=[Depends(verify_token)])

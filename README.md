@@ -6,6 +6,7 @@ A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expo
 
 - **System Updates**: Trigger `apt update && apt upgrade` remotely.
 - **Firmware Management**: Upload versioned firmware archives and install contained `.deb` packages asynchronously.
+- **ASTAP Star Database Management**: List and install supported ASTAP star databases (D50, D05, G05, W08) for Raspberry Pi 64-bit.
 - **Samba Management**: Enable or disable SMB shares for file access.
 - **PHD2 Management**: Check and control `phd2` service state.
 - **Wi-Fi Management**: Scan for available networks, connect securely, configure auto-connect, and inspect current connection status.
@@ -41,6 +42,7 @@ graph TD
     Upgrade[system-upgrade.sh]
     Firmware[install-firmware.sh]
     Indi[install-indi-package.sh]
+    Astap[install-astap-star-database.sh]
     Plugin[manage-plugin.sh]
     Samba[manage-samba.sh]
     WifiConnect[wifi-connect.sh]
@@ -50,6 +52,7 @@ graph TD
   JobMgr --> Upgrade
   JobMgr --> Firmware
   JobMgr --> Indi
+  JobMgr --> Astap
   JobMgr --> Plugin
   JobMgr --> Samba
   JobMgr --> WifiConnect
@@ -491,14 +494,57 @@ Install a selected package from the same release.
   - `INDI_RELEASE_API_URL` (default: `https://api.github.com/repos/acocalypso/indi3rdparty/releases/latest`)
   - `INDI_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-indi-package.sh`)
 
-### 15. Job Status
+### 15. ASTAP Star Databases
+
+List installable ASTAP star databases for Raspberry Pi 64-bit.
+Supported selections: `D50`, `D05`, `G05`, `W08`.
+
+- **URL**: `GET /packages/astap/stardatabases`
+- **Query params**:
+  - `onlyNotInstalled` (optional bool, default `true`)
+  - `q` (optional string filter by database id/label)
+- **Response**:
+  ```json
+  {
+    "checkedAt": "2026-06-09T12:00:00Z",
+    "onlyNotInstalled": true,
+    "packages": [
+      {
+        "databaseId": "D50",
+        "label": "D50",
+        "description": "Large star database",
+        "downloadUrl": "https://sourceforge.net/projects/astap-program/files/star_databases/d50_star_database.deb/download",
+        "installed": false,
+        "installedPackage": null,
+        "installedVersion": null
+      }
+    ]
+  }
+  ```
+
+Install one ASTAP star database.
+
+- **URL**: `POST /packages/astap/stardatabases/install`
+- **Body**:
+  ```json
+  {
+    "databaseId": "D50"
+  }
+  ```
+- **Response**: `JobResponse` object.
+
+- **Environment variables**:
+  - `ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-astap-star-database.sh`)
+  - `ASTAP_STAR_DATABASE_STATE_FILE` (default: `/opt/pinsdaemon/astap-star-databases.json`)
+
+### 16. Job Status
 
 Check the status of a background job.
 
 - **URL**: `GET /jobs/{jobId}`
 - **Response**: `JobResponse` object.
 
-### 16. Job Logs (WebSocket)
+### 17. Job Logs (WebSocket)
 
 Stream live logs from a running job.
 
