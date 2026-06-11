@@ -120,6 +120,7 @@ entry_type = (sys.argv[3] or "").strip()
 entry_label = (sys.argv[4] or "").strip()
 
 allowed_types = {
+    "camera",
     "filterwheel",
     "flatpanel",
     "focuser",
@@ -130,6 +131,9 @@ allowed_types = {
 }
 
 aliases = {
+    "cameras": "camera",
+    "ccd": "camera",
+    "ccds": "camera",
     "filterwheels": "filterwheel",
     "flatpanels": "flatpanel",
     "focusers": "focuser",
@@ -152,6 +156,8 @@ def type_from_group(group_raw: str) -> str:
     g = (group_raw or "").strip().lower()
     g = g.replace("-", " ").replace("_", " ")
 
+    if "camera" in g or "ccd" in g:
+        return "camera"
     if "filter" in g:
         return "filterwheel"
     if "flat" in g or "light" in g or "dust" in g:
@@ -170,6 +176,8 @@ def type_from_group(group_raw: str) -> str:
 def type_from_driver_name(driver_name: str) -> str:
     n = driver_name.strip().lower()
 
+    if any(token in n for token in ("ccd", "camera", "asi", "qhy", "svbony", "gphoto")):
+        return "camera"
     if any(token in n for token in ("filter", "wheel")):
         return "filterwheel"
     if any(token in n for token in ("flat", "dust", "lightbox", "light")):
@@ -216,21 +224,7 @@ def label_from_driver_name(driver_name: str) -> str:
 
 def is_supported_driver_name(driver_name: str) -> bool:
     n = driver_name.strip().lower()
-    if not n:
-        return False
-
-    unsupported_camera_markers = (
-        "_ccd",
-        "ccd_",
-        "_camera",
-        "camera_",
-    )
-    if n.endswith("ccd") or n.endswith("camera"):
-        return False
-    if any(marker in n for marker in unsupported_camera_markers):
-        return False
-
-    return True
+    return bool(n)
 
 
 def package_hint_tokens(package_name_raw: str) -> list[str]:
@@ -415,7 +409,7 @@ print(f"  XML drivers: {summarize_names(xml_driver_names)}")
 print(f"  Binary fallback drivers: {summarize_names(bin_only_driver_names)}")
 if ignored_unsupported_driver_names:
     print(
-        f"  Ignored unsupported camera drivers ({len(ignored_unsupported_driver_names)}): "
+        f"  Ignored unsupported drivers ({len(ignored_unsupported_driver_names)}): "
         f"{summarize_names(ignored_unsupported_driver_names)}"
     )
 
@@ -446,6 +440,7 @@ ignored_unsupported_names = set(ignored_unsupported_driver_names)
 non_selected_discovered_names = (all_discovered_names - selected_names) | ignored_unsupported_names
 
 default_data = {
+    "camera": [],
     "filterwheel": [],
     "flatpanel": [],
     "focuser": [],
@@ -456,16 +451,26 @@ default_data = {
 }
 
 data = dict(default_data)
+loaded_data = None
 if os.path.exists(json_path):
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             loaded = json.load(f)
         if isinstance(loaded, dict):
+            loaded_data = loaded
             for k in default_data.keys():
                 v = loaded.get(k, [])
                 data[k] = v if isinstance(v, list) else []
     except Exception:
         pass
+
+# Backward compatibility: older files may not have the camera section.
+if "camera" not in data or not isinstance(data.get("camera"), list):
+    data["camera"] = []
+if isinstance(loaded_data, dict) and (
+    "camera" not in loaded_data or not isinstance(loaded_data.get("camera"), list)
+):
+    print("Added missing 'camera' section to existing INDI 3rdparty registry")
 
 if non_selected_discovered_names:
     pruned_count = 0

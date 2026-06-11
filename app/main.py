@@ -124,6 +124,7 @@ ALLOWED_INDI_3RDPARTY_TYPES = {
     "switches",
     "telescope",
     "weather",
+    "camera",
 }
 ASTAP_STAR_DATABASES = [
     {
@@ -870,6 +871,9 @@ def _normalize_indi_3rdparty_type(value: Optional[str]) -> Optional[str]:
         return None
 
     aliases = {
+        "cameras": "camera",
+        "ccd": "camera",
+        "ccds": "camera",
         "filterwheels": "filterwheel",
         "flatpanels": "flatpanel",
         "focusers": "focuser",
