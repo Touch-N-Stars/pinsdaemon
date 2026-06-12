@@ -35,4 +35,6 @@ sysupdate-api ALL=(root) NOPASSWD: /bin/systemctl show -p ExecMainStatus\,Result
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/NetworkManager/dnsmasq-wlan0.leases
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/NetworkManager/dnsmasq-wlan1.leases
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/misc/dnsmasq.leases
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /home/pi/Documents/INDI/3rdparty.json
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/tee /home/pi/Documents/INDI/3rdparty.json
 

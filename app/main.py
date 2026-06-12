@@ -9,6 +9,7 @@ import tempfile
 import shutil
 import zipfile
 import time
+import subprocess
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -163,6 +164,17 @@ DIAGNOSTICS_SCRIPT_PATH = os.getenv("DIAGNOSTICS_SCRIPT_PATH", DEFAULT_DIAGNOSTI
 DIAGNOSTICS_WORK_DIR = os.getenv("DIAGNOSTICS_WORK_DIR", "/tmp/pinsdaemon-diagnostics")
 DIAGNOSTICS_COLLECTION_TIMEOUT_SECONDS = max(30, int(os.getenv("DIAGNOSTICS_COLLECTION_TIMEOUT_SECONDS", "900")))
 DIAGNOSTICS_RETENTION_SECONDS = max(300, int(os.getenv("DIAGNOSTICS_RETENTION_SECONDS", "86400")))
+INDI_3RDPARTY_JSON_PATH = os.getenv("INDI_3RDPARTY_JSON_PATH", "/home/pi/Documents/INDI/3rdparty.json")
+INDI_3RDPARTY_REGISTRY_TYPES = [
+    "camera",
+    "filterwheel",
+    "flatpanel",
+    "focuser",
+    "rotator",
+    "switches",
+    "telescope",
+    "weather",
+]
 
 class UpgradeRequest(BaseModel):
     dryRun: bool = False
@@ -288,6 +300,26 @@ class IndiPackageInstallRequest(BaseModel):
     assetName: str
     label: Optional[str] = None
     type: Optional[str] = None
+
+
+class Indi3rdpartyRegistryEntry(BaseModel):
+    Name: str
+    Label: str
+    Type: str
+
+
+class Indi3rdpartyRegistryResponse(BaseModel):
+    updatedAt: str
+    totalEntries: int
+    entriesByType: Dict[str, List[Indi3rdpartyRegistryEntry]]
+
+
+class Indi3rdpartyRegistryEntryUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    Name: Optional[str] = None
+    Label: Optional[str] = None
+    Type: Optional[str] = None
 
 
 class AstapStarDatabaseInfo(BaseModel):
@@ -902,6 +934,130 @@ def _normalize_optional_text(value: Optional[str], field_name: str) -> Optional[
     return candidate
 
 
+def _default_indi_3rdparty_registry() -> Dict[str, List[Dict[str, str]]]:
+    return {bucket: [] for bucket in INDI_3RDPARTY_REGISTRY_TYPES}
+
+
+def _read_indi_3rdparty_registry_text() -> str:
+    try:
+        with open(INDI_3RDPARTY_JSON_PATH, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+    except PermissionError:
+        proc = subprocess.run(
+            ["sudo", "-n", "cat", INDI_3RDPARTY_JSON_PATH],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            reason = proc.stderr.strip() or f"exit code {proc.returncode}"
+            raise HTTPException(status_code=500, detail=f"Unable to read INDI 3rdparty registry: {reason}")
+        return proc.stdout
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to read INDI 3rdparty registry: {exc}")
+
+
+def _load_indi_3rdparty_registry() -> Dict[str, List[Dict[str, str]]]:
+    normalized = _default_indi_3rdparty_registry()
+    text = _read_indi_3rdparty_registry_text()
+    if not text.strip():
+        return normalized
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail=f"INDI 3rdparty registry is invalid JSON: {exc}")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="INDI 3rdparty registry root must be a JSON object")
+
+    for bucket in INDI_3RDPARTY_REGISTRY_TYPES:
+        raw_entries = payload.get(bucket, [])
+        if not isinstance(raw_entries, list):
+            continue
+
+        seen_by_name: dict[str, Dict[str, str]] = {}
+        for raw in raw_entries:
+            if not isinstance(raw, dict):
+                continue
+
+            name = str(raw.get("Name", "")).strip()
+            if not name:
+                continue
+
+            label_raw = raw.get("Label")
+            label = str(label_raw).strip() if isinstance(label_raw, str) else ""
+            if not label:
+                label = name
+
+            seen_by_name[name] = {
+                "Name": name,
+                "Label": label,
+                "Type": bucket,
+            }
+
+        normalized[bucket] = sorted(seen_by_name.values(), key=lambda entry: entry["Name"].lower())
+
+    return normalized
+
+
+def _write_indi_3rdparty_registry(data: Dict[str, List[Dict[str, str]]]) -> None:
+    payload = json.dumps(data, indent=2) + "\n"
+    path = INDI_3RDPARTY_JSON_PATH
+    directory = os.path.dirname(path)
+    if directory:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except PermissionError:
+            # Directory might be root-owned; fallback writer below may still succeed.
+            pass
+
+    temp_path = f"{path}.tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(temp_path, path)
+        return
+    except PermissionError:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+        proc = subprocess.run(
+            ["sudo", "-n", "tee", path],
+            input=payload,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            reason = proc.stderr.strip() or f"exit code {proc.returncode}"
+            raise HTTPException(status_code=500, detail=f"Unable to write INDI 3rdparty registry: {reason}")
+    except OSError as exc:
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Unable to write INDI 3rdparty registry: {exc}")
+
+
+def _build_indi_3rdparty_registry_response(data: Dict[str, List[Dict[str, str]]]) -> Indi3rdpartyRegistryResponse:
+    total_entries = sum(len(entries) for entries in data.values())
+    return Indi3rdpartyRegistryResponse(
+        updatedAt=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        totalEntries=total_entries,
+        entriesByType={
+            bucket: [Indi3rdpartyRegistryEntry(**entry) for entry in data.get(bucket, [])]
+            for bucket in INDI_3RDPARTY_REGISTRY_TYPES
+        },
+    )
+
+
 def _normalize_astap_star_database_id(value: str) -> str:
     candidate = value.strip().upper()
     if not candidate:
@@ -1264,6 +1420,77 @@ async def list_indi3rdparty_packages(onlyNotInstalled: bool = False, q: Optional
 
     checked_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     return IndiPackagesResponse(checkedAt=checked_at, onlyNotInstalled=onlyNotInstalled, packages=packages)
+
+
+@app.get("/packages/indi3rdparty/registry", response_model=Indi3rdpartyRegistryResponse, dependencies=[Depends(verify_token)])
+async def get_indi3rdparty_registry():
+    data = _load_indi_3rdparty_registry()
+    return _build_indi_3rdparty_registry_response(data)
+
+
+@app.patch("/packages/indi3rdparty/registry/{entry_name}", response_model=Indi3rdpartyRegistryResponse, dependencies=[Depends(verify_token)])
+async def update_indi3rdparty_registry_entry(entry_name: str, request: Indi3rdpartyRegistryEntryUpdateRequest):
+    current_name = entry_name.strip()
+    if not current_name:
+        raise HTTPException(status_code=400, detail="entry_name is required")
+
+    data = _load_indi_3rdparty_registry()
+
+    source_bucket: Optional[str] = None
+    source_index: Optional[int] = None
+    source_entry: Optional[Dict[str, str]] = None
+
+    for bucket in INDI_3RDPARTY_REGISTRY_TYPES:
+        entries = data.get(bucket, [])
+        for idx, entry in enumerate(entries):
+            if entry.get("Name") == current_name:
+                source_bucket = bucket
+                source_index = idx
+                source_entry = entry
+                break
+        if source_entry:
+            break
+
+    if not source_entry or source_bucket is None or source_index is None:
+        raise HTTPException(status_code=404, detail=f"INDI 3rdparty entry not found: {current_name}")
+
+    target_name = _normalize_optional_text(request.Name, "Name") or source_entry["Name"]
+    target_label = _normalize_optional_text(request.Label, "Label") or source_entry["Label"]
+    target_type = _normalize_indi_3rdparty_type(request.Type) or source_entry["Type"]
+
+    if target_name != source_entry["Name"]:
+        for bucket in INDI_3RDPARTY_REGISTRY_TYPES:
+            for existing in data.get(bucket, []):
+                if existing.get("Name") == target_name:
+                    raise HTTPException(status_code=409, detail=f"INDI 3rdparty entry already exists: {target_name}")
+
+    # Remove original entry from its current bucket.
+    data[source_bucket].pop(source_index)
+
+    updated_entry = {
+        "Name": target_name,
+        "Label": target_label,
+        "Type": target_type,
+    }
+
+    data.setdefault(target_type, []).append(updated_entry)
+
+    # Keep output deterministic and avoid duplicates by Name per bucket.
+    for bucket in INDI_3RDPARTY_REGISTRY_TYPES:
+        deduped: dict[str, Dict[str, str]] = {}
+        for entry in data.get(bucket, []):
+            name = entry.get("Name", "")
+            if not name:
+                continue
+            deduped[name] = {
+                "Name": name,
+                "Label": entry.get("Label", name),
+                "Type": bucket,
+            }
+        data[bucket] = sorted(deduped.values(), key=lambda entry: entry["Name"].lower())
+
+    _write_indi_3rdparty_registry(data)
+    return _build_indi_3rdparty_registry_response(data)
 
 
 @app.get("/packages/astap/stardatabases", response_model=AstapStarDatabasesResponse, dependencies=[Depends(verify_token)])

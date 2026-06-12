@@ -490,9 +490,48 @@ Install a selected package from the same release.
   ```
 - **Response**: `JobResponse` object.
 
+Read current INDI 3rdparty registry (`3rdparty.json`) including all entries grouped by type.
+
+- **URL**: `GET /packages/indi3rdparty/registry`
+- **Response**:
+  ```json
+  {
+    "updatedAt": "2026-06-12T10:30:00Z",
+    "totalEntries": 4,
+    "entriesByType": {
+      "camera": [
+        {"Name": "indi_asi_ccd", "Label": "ASI CCD", "Type": "camera"}
+      ],
+      "filterwheel": [],
+      "flatpanel": [],
+      "focuser": [],
+      "rotator": [],
+      "switches": [
+        {"Name": "indi_something_switch", "Label": "SOMETHING SWITCH", "Type": "switches"}
+      ],
+      "telescope": [],
+      "weather": []
+    }
+  }
+  ```
+
+Edit one registry entry by driver name. You can rename it (`Name`), relabel (`Label`), and/or move it to another type bucket (`Type`).
+
+- **URL**: `PATCH /packages/indi3rdparty/registry/{entryName}`
+- **Body** (all fields optional):
+  ```json
+  {
+    "Name": "indi_asi_ccd",
+    "Label": "ASI Camera",
+    "Type": "camera"
+  }
+  ```
+- **Response**: full `Indi3rdpartyRegistryResponse` object after the update.
+
 - **Environment variables**:
   - `INDI_RELEASE_API_URL` (default: `https://api.github.com/repos/acocalypso/indi3rdparty/releases/latest`)
   - `INDI_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-indi-package.sh`)
+  - `INDI_3RDPARTY_JSON_PATH` (default: `/home/pi/Documents/INDI/3rdparty.json`)
 
 ### 15. ASTAP Star Databases
 
