@@ -190,6 +190,7 @@ Runtime behavior:
 - A NetworkManager dispatcher hook monitors disconnect/change events on the configured client/hotspot interfaces.
 - It retries reconnection to the configured auto-connect SSID (default: 3 attempts, 5s backoff).
 - If retries fail, it enables the device hotspot automatically.
+- The fallback hotspot profile uses a higher NetworkManager autoconnect priority than default client Wi-Fi profiles so the device remains reachable instead of bouncing between a flaky client network and hotspot mode.
 
 - **URL**: `POST /wifi/connect`
 - **Body**:

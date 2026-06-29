@@ -308,7 +308,11 @@ enable_hotspot() {
             if nmcli connection show "$conn" >/dev/null 2>&1; then
                 echo "Configuring hotspot profile: $conn"
                 nmcli connection modify "$conn" connection.autoconnect yes || true
-                nmcli connection modify "$conn" connection.autoconnect-priority -100 || true
+                # Fallback hotspot must win NetworkManager autoconnect arbitration once
+                # recovery has given up on client Wi-Fi. A low priority lets saved
+                # client profiles pull the single Wi-Fi adapter away again, causing
+                # client/hotspot bounce loops on flaky phone hotspots.
+                nmcli connection modify "$conn" connection.autoconnect-priority 100 || true
                 nmcli connection modify "$conn" 802-11-wireless.mode ap || true
                 nmcli connection modify "$conn" ipv4.method shared || true
                 nmcli connection modify "$conn" ipv6.method disabled || true
