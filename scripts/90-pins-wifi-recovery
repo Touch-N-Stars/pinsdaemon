@@ -20,12 +20,22 @@ WIFI_CONNECT_SCRIPT="/usr/local/bin/wifi-connect.sh"
 MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
 LOG_TAG="pins-wifi-recovery"
 DEFAULT_WIFI_INTERFACE="wlan0"
+LOCAL_LOG_DIR="${PINSDAEMON_LOG_DIR:-/opt/pinsdaemon/logs}"
+LOCAL_LOG_RETENTION_DAYS="${PINSDAEMON_LOG_RETENTION_DAYS:-5}"
 
 MAX_RETRIES="${PINS_WIFI_RECOVERY_MAX_RETRIES:-3}"
 BACKOFF_SECONDS="${PINS_WIFI_RECOVERY_BACKOFF_SECONDS:-5}"
 
+prune_local_logs() {
+    mkdir -p "$LOCAL_LOG_DIR" 2>/dev/null || return 0
+    find "$LOCAL_LOG_DIR" -maxdepth 1 -type f -name 'wifi-recovery-*.log' -mtime +"$((LOCAL_LOG_RETENTION_DAYS - 1))" -delete 2>/dev/null || true
+}
+
 log() {
-    logger -t "$LOG_TAG" "$*"
+    local message="$*"
+    logger -t "$LOG_TAG" "$message"
+    prune_local_logs
+    printf "%s %s\n" "$(date --iso-8601=seconds)" "$message" >>"$LOCAL_LOG_DIR/wifi-recovery-$(date +%F).log" 2>/dev/null || true
 }
 
 read_configured_interfaces() {

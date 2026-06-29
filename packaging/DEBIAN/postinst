@@ -8,6 +8,9 @@ fi
 
 # Set permissions
 chown -R sysupdate-api:sysupdate-api /opt/pinsdaemon
+mkdir -p /opt/pinsdaemon/logs
+chown sysupdate-api:sysupdate-api /opt/pinsdaemon/logs
+chmod 750 /opt/pinsdaemon/logs
 
 # Ensure sudoers file is owned by root (Critical for sudo to work)
 chown root:root /etc/sudoers.d/sysupdate-api

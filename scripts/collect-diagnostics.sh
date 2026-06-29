@@ -12,6 +12,7 @@ INCLUDE_DMESG=1
 INCLUDE_SYSTEM_INFO=1
 INCLUDE_NETWORK_INFO=1
 INCLUDE_KERNEL_MODULES=1
+PINSDAEMON_LOG_DIR="${PINSDAEMON_LOG_DIR:-/opt/pinsdaemon/logs}"
 
 usage() {
     echo "Usage: $0 --output-dir <dir> [options]"
@@ -151,6 +152,13 @@ fi
 if [ "$INCLUDE_API_JOURNAL" -eq 1 ]; then
     run_command "$OUTPUT_DIR/logs/journal-sysupdate-api.txt" journalctl -u sysupdate-api -n "$JOURNAL_LINES" --no-pager
     run_command "$OUTPUT_DIR/logs/journal-sysupdate-api-service.txt" journalctl -u sysupdate-api.service -n "$JOURNAL_LINES" --no-pager
+    if [ -d "$PINSDAEMON_LOG_DIR" ]; then
+        mkdir -p "$OUTPUT_DIR/logs/pinsdaemon-local"
+        find "$PINSDAEMON_LOG_DIR" -maxdepth 1 -type f -name '*.log' -mtime -5 -print0 \
+            | while IFS= read -r -d '' log_file; do
+                cp "$log_file" "$OUTPUT_DIR/logs/pinsdaemon-local/$(basename "$log_file")" 2>/dev/null || true
+            done
+    fi
 fi
 
 if [ "$INCLUDE_USB" -eq 1 ]; then

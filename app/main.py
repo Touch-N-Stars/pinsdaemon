@@ -22,8 +22,11 @@ from typing import Optional, List, Dict, Any
 
 from .auth import verify_token
 from .job_manager import job_manager, JobStatus
+from .local_logging import install_stdio_tee
 from .wifi_config import load_wifi_config, save_wifi_config
 from .hotspot_config import load_hotspot_config, save_hotspot_settings
+
+install_stdio_tee()
 
 app = FastAPI(title="System Update Daemon")
 

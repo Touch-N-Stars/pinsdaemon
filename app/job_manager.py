@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
+from .local_logging import append_local_log, redact_log_line
+
 class JobStatus(str, Enum):
     STARTED = "started"
     RUNNING = "running"
@@ -26,6 +28,7 @@ class Job:
 
     async def add_log(self, line: str):
         self.logs.append(line)
+        append_local_log("jobs", f"job {self.id}: {line}")
         # Broadcast to all active listeners
         for listener in self.listeners:
             await listener.put(line)
@@ -46,9 +49,7 @@ class JobManager:
     @staticmethod
     def _sanitize_log_line(line: str) -> str:
         """Redact common credential tokens before storing/streaming logs."""
-        redacted = re.sub(r'(\bpassword\s+)("[^"]*"|\S+)', r'\1***', line, flags=re.IGNORECASE)
-        redacted = re.sub(r'(\bwifi-sec\.psk\s+)("[^"]*"|\S+)', r'\1***', redacted, flags=re.IGNORECASE)
-        return redacted
+        return redact_log_line(line)
 
     async def start_job(
         self,
@@ -60,6 +61,7 @@ class JobManager:
             job_id = str(uuid.uuid4())
         job = Job(id=job_id, command=display_command if display_command is not None else " ".join(command))
         self.jobs[job_id] = job
+        append_local_log("jobs", f"job {job_id} started: {job.command}")
         
         # Start background task to run the process
         asyncio.create_task(self._run_process(job_id, command))
@@ -230,6 +232,10 @@ class JobManager:
             job.exit_code = process.returncode
             job.finished_at = time.time()
             job.status = JobStatus.SUCCESS if job.exit_code == 0 else JobStatus.FAILED
+            append_local_log(
+                "jobs",
+                f"job {job_id} finished status={job.status} exit_code={job.exit_code}",
+            )
             
             # Notify listeners that job is done
             for listener in job.listeners:
@@ -240,6 +246,7 @@ class JobManager:
             error_msg = f"Internal Error: {repr(e)}"
             print(f"Job failed with exception: {traceback.format_exc()}") # Print to server console for debugging
             await job.add_log(error_msg)
+            append_local_log("jobs", f"job {job_id} failed with internal exception: {repr(e)}")
             
             job.exit_code = -1
             job.status = JobStatus.FAILED

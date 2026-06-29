@@ -412,6 +412,7 @@ Download archive when status is `success`:
 The ZIP contains selected troubleshooting data such as:
 
 - `journalctl -u pins` and `journalctl -u sysupdate-api` logs
+- local pinsdaemon daily log files from `/opt/pinsdaemon/logs` retained for 5 days, including daemon output, job output, and Wi-Fi recovery decisions
 - `lsusb`, `lsusb -t`, `usb-devices`
 - `dmesg` tail and USB-focused dmesg filters
 - `nmcli`, `ip`, `rfkill`, and `iw` outputs
