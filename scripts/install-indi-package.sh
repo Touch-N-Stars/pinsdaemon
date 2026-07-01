@@ -113,6 +113,7 @@ import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from typing import Optional
 
 json_path = sys.argv[1]
 package_name = sys.argv[2]
@@ -140,6 +141,17 @@ aliases = {
     "rotators": "rotator",
     "switch": "switches",
     "telescopes": "telescope",
+}
+
+driver_type_suffixes = {
+    "camera": ("ccd", "camera"),
+    "filterwheel": ("wheel", "filterwheel"),
+    "flatpanel": ("flat", "flatpanel", "lightbox", "light", "dustcap"),
+    "focuser": ("focus", "focuser"),
+    "rotator": ("rotator",),
+    "switches": ("switch", "aux"),
+    "telescope": ("mount", "telescope"),
+    "weather": ("weather", "meteo", "gps"),
 }
 
 
@@ -314,13 +326,42 @@ def list_package_driver_binaries(pkg_files: list[str]) -> list[str]:
     return sorted(set(result))
 
 
-def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], list[str], list[str]]:
+def resolve_xml_driver_name(
+    xml_name: str,
+    dtype: str,
+    binary_names: set[str],
+) -> tuple[str, Optional[str]]:
+    if xml_name in binary_names:
+        return xml_name, None
+
+    prefix = f"{xml_name.lower()}_"
+    candidates = sorted(name for name in binary_names if name.lower().startswith(prefix))
+    if not candidates:
+        return xml_name, None
+
+    suffixes = driver_type_suffixes.get(dtype, ())
+    preferred: list[str] = []
+    for candidate in candidates:
+        tail = candidate.lower()[len(prefix):]
+        if any(tail == suffix or tail.startswith(f"{suffix}_") for suffix in suffixes):
+            preferred.append(candidate)
+
+    if len(preferred) == 1:
+        return preferred[0], xml_name
+    if len(candidates) == 1:
+        return candidates[0], xml_name
+    return xml_name, None
+
+
+def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], list[str], list[str], list[tuple[str, str]]]:
     pkg_files = list_package_files(pkg)
     discovered_from_xml: list[tuple[str, str, str]] = []
     discovered_from_bins: list[tuple[str, str, str]] = []
     ignored_unsupported_names: list[str] = []
+    xml_aliases: list[tuple[str, str]] = []
     xml_files = list_package_xml_files(pkg_files)
     bin_files = list_package_driver_binaries(pkg_files)
+    bin_names = {os.path.basename(path).strip() for path in bin_files}
 
     for xml_path in xml_files:
         try:
@@ -338,7 +379,10 @@ def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], l
                     if not is_supported_driver_name(name):
                         ignored_unsupported_names.append(name)
                         continue
-                    discovered_from_xml.append((name, label if label else name, group))
+                    resolved_name, alias_name = resolve_xml_driver_name(name, group, bin_names)
+                    if alias_name:
+                        xml_aliases.append((alias_name, resolved_name))
+                    discovered_from_xml.append((resolved_name, label if label else resolved_name, group))
                     found_in_group = True
 
         if found_in_group:
@@ -351,7 +395,10 @@ def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], l
                 if not is_supported_driver_name(name):
                     ignored_unsupported_names.append(name)
                     continue
-                discovered_from_xml.append((name, label if label else name, "switches"))
+                resolved_name, alias_name = resolve_xml_driver_name(name, "switches", bin_names)
+                if alias_name:
+                    xml_aliases.append((alias_name, resolved_name))
+                discovered_from_xml.append((resolved_name, label if label else resolved_name, "switches"))
 
     for bin_path in bin_files:
         name = os.path.basename(bin_path).strip()
@@ -374,9 +421,10 @@ def discover_drivers(pkg: str) -> tuple[list[tuple[str, str, str]], list[str], l
     bin_names = sorted({name for name, _, _ in discovered_from_bins})
     bin_only_names = [name for name in bin_names if name not in set(xml_names)]
     ignored_names = sorted(set(ignored_unsupported_names))
+    aliases = sorted(set(xml_aliases))
 
     merged_entries = [merged_by_name[name] for name in sorted(merged_by_name.keys())]
-    return merged_entries, xml_names, bin_only_names, ignored_names
+    return merged_entries, xml_names, bin_only_names, ignored_names, aliases
 
 
 def summarize_names(names: list[str], max_items: int = 20) -> str:
@@ -390,7 +438,13 @@ def summarize_names(names: list[str], max_items: int = 20) -> str:
 if entry_type:
     entry_type = normalize_type(entry_type)
 
-all_discovered_entries, xml_driver_names, bin_only_driver_names, ignored_unsupported_driver_names = discover_drivers(package_name)
+(
+    all_discovered_entries,
+    xml_driver_names,
+    bin_only_driver_names,
+    ignored_unsupported_driver_names,
+    xml_driver_aliases,
+) = discover_drivers(package_name)
 entries = filter_entries_by_package_hint(package_name, all_discovered_entries)
 if not entries:
     print(
@@ -407,6 +461,9 @@ print(
 )
 print(f"  XML drivers: {summarize_names(xml_driver_names)}")
 print(f"  Binary fallback drivers: {summarize_names(bin_only_driver_names)}")
+if xml_driver_aliases:
+    alias_summary = summarize_names([f"{source} -> {target}" for source, target in xml_driver_aliases])
+    print(f"  Resolved XML driver aliases: {alias_summary}")
 if ignored_unsupported_driver_names:
     print(
         f"  Ignored unsupported drivers ({len(ignored_unsupported_driver_names)}): "
@@ -437,7 +494,8 @@ elif entry_label and len(entries) > 1:
 all_discovered_names = {name for name, _, _ in all_discovered_entries}
 selected_names = {name for name, _, _ in entries}
 ignored_unsupported_names = set(ignored_unsupported_driver_names)
-non_selected_discovered_names = (all_discovered_names - selected_names) | ignored_unsupported_names
+xml_alias_names = {source for source, _ in xml_driver_aliases}
+non_selected_discovered_names = (all_discovered_names - selected_names) | ignored_unsupported_names | xml_alias_names
 
 default_data = {
     "camera": [],

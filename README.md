@@ -493,6 +493,10 @@ Install a selected package from the same release.
 - **Response**: `JobResponse` object.
 
 Read current INDI 3rdparty registry (`3rdparty.json`) including all entries grouped by type.
+The registry `Name` is the INDI driver executable/selection identifier used by
+the equipment setup flow. Use `Label` for the human-readable display name.
+During package installation, XML driver aliases are resolved to installed driver
+binary names when possible so multi-device drivers remain connectable.
 
 - **URL**: `GET /packages/indi3rdparty/registry`
 - **Response**:
@@ -517,7 +521,7 @@ Read current INDI 3rdparty registry (`3rdparty.json`) including all entries grou
   }
   ```
 
-Edit one registry entry by driver name. You can rename it (`Name`), relabel (`Label`), and/or move it to another type bucket (`Type`).
+Edit one registry entry by driver name. You can rename it (`Name`), relabel (`Label`), and/or move it to another type bucket (`Type`). Prefer changing `Label` for user-facing names; changing `Name` should only be done when correcting the actual INDI driver identifier.
 
 - **URL**: `PATCH /packages/indi3rdparty/registry/{entryName}`
 - **Body** (all fields optional):
