@@ -221,6 +221,9 @@ class WifiStatusResponse(BaseModel):
     connected: bool
     ssid: Optional[str] = None
     band: Optional[str] = None # "2.4GHz" or "5GHz"
+    interface: Optional[str] = None
+    ipAddress: Optional[str] = None
+    connectionName: Optional[str] = None
 
 
 class WifiAdapterInfo(BaseModel):
@@ -535,6 +538,70 @@ async def _read_nmcli_device_details(interface: str) -> tuple[Optional[str], Opt
             mtu = None
 
     return mac, driver, mtu
+
+
+async def _read_nmcli_ipv4_address(interface: str) -> Optional[str]:
+    proc = await asyncio.create_subprocess_exec(
+        "nmcli",
+        "-g",
+        "IP4.ADDRESS",
+        "device",
+        "show",
+        interface,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+
+    for raw_line in stdout.decode(errors="replace").splitlines():
+        value = raw_line.strip()
+        if not value:
+            continue
+        address = value.split("/", 1)[0].strip()
+        if address:
+            return address
+    return None
+
+
+async def _read_active_wifi_client_connection() -> tuple[Optional[str], Optional[str]]:
+    proc = await asyncio.create_subprocess_exec(
+        "nmcli",
+        "-t",
+        "-f",
+        "NAME,TYPE,DEVICE",
+        "connection",
+        "show",
+        "--active",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None, None
+
+    configured_client_interface, _ = _get_configured_wifi_interfaces()
+    fallback: tuple[Optional[str], Optional[str]] = (None, None)
+
+    for raw_line in stdout.decode(errors="replace").splitlines():
+        fields = _parse_nmcli_row(raw_line)
+        if len(fields) < 3:
+            continue
+
+        name, conn_type, interface = fields[0], fields[1], fields[2]
+        if conn_type != "802-11-wireless" or not interface:
+            continue
+        if _is_hotspot_connection_name(name):
+            continue
+
+        candidate = (name or None, interface)
+        if interface == configured_client_interface:
+            return candidate
+        if fallback == (None, None):
+            fallback = candidate
+
+    return fallback
 
 
 async def _list_wifi_adapters() -> list[WifiAdapterInfo]:
@@ -2188,9 +2255,18 @@ async def get_wifi_status():
     Check current WiFi connection status and SSID.
     """
     try:
-        # Use nmcli to get active connections
-        # We use 'device wifi' to get frequency information directly for the connected network
-        cmd = ["nmcli", "-t", "-f", "IN-USE,SSID,FREQ", "device", "wifi"]
+        connection_name, interface = await _read_active_wifi_client_connection()
+        if not interface:
+            return WifiStatusResponse(
+                connected=False,
+                ssid=None,
+                band=None,
+                interface=None,
+                ipAddress=None,
+                connectionName=None,
+            )
+
+        cmd = ["nmcli", "-t", "-f", "IN-USE,SSID,FREQ", "device", "wifi", "list", "ifname", interface]
         
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -2208,10 +2284,10 @@ async def get_wifi_status():
                 # Format: *:SSID:Frequency MHz
                 # Example: *:MyHomeWifi:5240 MHz
                 # Clean up any potential escaping
-                parts = line.split(':')
+                parts = _parse_nmcli_row(line)
                 
                 # Check if this line is the "in-use" one (starts with *)
-                if parts[0] == "*":
+                if len(parts) >= 1 and parts[0] == "*":
                     if len(parts) >= 3:
                         ssid = parts[1]
                         
@@ -2232,16 +2308,31 @@ async def get_wifi_status():
                             pass
                             
                     break
+
+        if not connected_ssid:
+            connected_ssid = connection_name
+
+        ip_address = await _read_nmcli_ipv4_address(interface)
         
         return WifiStatusResponse(
             connected=bool(connected_ssid),
             ssid=connected_ssid,
-            band=band
+            band=band,
+            interface=interface,
+            ipAddress=ip_address,
+            connectionName=connection_name,
         )
         
     except Exception as e:
         print(f"Error checking wifi status: {e}")
-        return WifiStatusResponse(connected=False, ssid=None, band=None)
+        return WifiStatusResponse(
+            connected=False,
+            ssid=None,
+            band=None,
+            interface=None,
+            ipAddress=None,
+            connectionName=None,
+        )
 
 
 class SystemTimeResponse(BaseModel):

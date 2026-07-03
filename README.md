@@ -243,7 +243,10 @@ Return whether device is connected to Wi-Fi and detect active band.
   {
     "connected": true,
     "ssid": "MyWiFi",
-    "band": "5GHz"
+    "band": "5GHz",
+    "interface": "wlan0",
+    "ipAddress": "192.168.1.42",
+    "connectionName": "MyWiFi"
   }
   ```
 
@@ -643,7 +646,10 @@ Stream live logs from a running job.
 {
   "connected": true,
   "ssid": "MyWiFi",
-  "band": "2.4GHz|5GHz|null"
+  "band": "2.4GHz|5GHz|null",
+  "interface": "wlan0",
+  "ipAddress": "192.168.1.42",
+  "connectionName": "MyWiFi"
 }
 ```
 
