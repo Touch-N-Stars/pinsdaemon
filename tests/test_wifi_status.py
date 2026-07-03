@@ -42,6 +42,60 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ip_address, "192.168.1.42")
 
+    async def test_read_active_wifi_connections_includes_client_and_hotspot_roles(self):
+        output = "\n".join(
+            [
+                "pins-123:802-11-wireless:wlan1",
+                "HomeWifi:802-11-wireless:wlan0",
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return FakeProcess(output)
+
+        with patch.object(main, "_get_configured_wifi_interfaces", return_value=("wlan0", "wlan1")):
+            with patch.object(main.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+                connections = await main._read_active_wifi_connections()
+
+        self.assertEqual(
+            connections,
+            [
+                {
+                    "connectionName": "HomeWifi",
+                    "interface": "wlan0",
+                    "role": "client",
+                    "preferred": "true",
+                },
+                {
+                    "connectionName": "pins-123",
+                    "interface": "wlan1",
+                    "role": "hotspot",
+                    "preferred": None,
+                },
+            ],
+        )
+
+    async def test_read_wifi_connection_metrics_parses_signal_channel_frequency_and_band(self):
+        output = "InfraWifi:80:1:2412 MHz\n*:HomeWifi:67:36:5180 MHz\n"
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return FakeProcess(output)
+
+        with patch.object(main.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+            metrics = await main._read_wifi_connection_metrics("wlan0")
+
+        self.assertEqual(
+            metrics,
+            {
+                "ssid": "HomeWifi",
+                "signalStrength": 67,
+                "quality": "67/100",
+                "channel": 36,
+                "frequency": 5180.0,
+                "band": "5GHz",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

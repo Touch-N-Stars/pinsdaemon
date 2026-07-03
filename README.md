@@ -235,7 +235,7 @@ Disable Wi-Fi client mode and force hotspot mode.
 
 ### 9. Wi-Fi Status
 
-Return whether device is connected to Wi-Fi and detect active band.
+Return whether device is connected to Wi-Fi and detect active band, signal metrics, and active client/hotspot roles.
 
 - **URL**: `GET /wifi/status`
 - **Response**:
@@ -246,7 +246,39 @@ Return whether device is connected to Wi-Fi and detect active band.
     "band": "5GHz",
     "interface": "wlan0",
     "ipAddress": "192.168.1.42",
-    "connectionName": "MyWiFi"
+    "connectionName": "MyWiFi",
+    "signalStrength": 67,
+    "quality": "67/100",
+    "channel": 36,
+    "frequency": 5180.0,
+    "connections": [
+      {
+        "role": "client",
+        "connected": true,
+        "ssid": "MyWiFi",
+        "band": "5GHz",
+        "interface": "wlan0",
+        "ipAddress": "192.168.1.42",
+        "connectionName": "MyWiFi",
+        "signalStrength": 67,
+        "quality": "67/100",
+        "channel": 36,
+        "frequency": 5180.0
+      },
+      {
+        "role": "hotspot",
+        "connected": true,
+        "ssid": "pins-123",
+        "band": null,
+        "interface": "wlan1",
+        "ipAddress": "10.42.0.1",
+        "connectionName": "pins-123",
+        "signalStrength": null,
+        "quality": null,
+        "channel": null,
+        "frequency": null
+      }
+    ]
   }
   ```
 
@@ -649,7 +681,26 @@ Stream live logs from a running job.
   "band": "2.4GHz|5GHz|null",
   "interface": "wlan0",
   "ipAddress": "192.168.1.42",
-  "connectionName": "MyWiFi"
+  "connectionName": "MyWiFi",
+  "signalStrength": 67,
+  "quality": "67/100",
+  "channel": 36,
+  "frequency": 5180.0,
+  "connections": [
+    {
+      "role": "client|hotspot",
+      "connected": true,
+      "ssid": "MyWiFi",
+      "band": "2.4GHz|5GHz|null",
+      "interface": "wlan0",
+      "ipAddress": "192.168.1.42",
+      "connectionName": "MyWiFi",
+      "signalStrength": 67,
+      "quality": "67/100",
+      "channel": 36,
+      "frequency": 5180.0
+    }
+  ]
 }
 ```
 

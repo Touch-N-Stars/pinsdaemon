@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Dict, Any
 
 from .auth import verify_token
@@ -217,6 +217,20 @@ class WifiAutoConnectRequest(BaseModel):
     auto_connect: bool
     band: Optional[str] = None # "2.4GHz" or "5GHz" where bg=2.4 and a=5
 
+class WifiConnectionStatus(BaseModel):
+    role: str
+    connected: bool
+    ssid: Optional[str] = None
+    band: Optional[str] = None # "2.4GHz" or "5GHz"
+    interface: Optional[str] = None
+    ipAddress: Optional[str] = None
+    connectionName: Optional[str] = None
+    signalStrength: Optional[int] = None
+    quality: Optional[str] = None
+    channel: Optional[int] = None
+    frequency: Optional[float] = None
+
+
 class WifiStatusResponse(BaseModel):
     connected: bool
     ssid: Optional[str] = None
@@ -224,6 +238,11 @@ class WifiStatusResponse(BaseModel):
     interface: Optional[str] = None
     ipAddress: Optional[str] = None
     connectionName: Optional[str] = None
+    signalStrength: Optional[int] = None
+    quality: Optional[str] = None
+    channel: Optional[int] = None
+    frequency: Optional[float] = None
+    connections: List[WifiConnectionStatus] = Field(default_factory=list)
 
 
 class WifiAdapterInfo(BaseModel):
@@ -511,6 +530,26 @@ def _is_hotspot_connection_name(name: str) -> bool:
     return name in {"Hotspot", "hotspot-ap"} or name.startswith("pins-")
 
 
+def _band_from_frequency_mhz(frequency_mhz: Optional[float]) -> Optional[str]:
+    if frequency_mhz is None:
+        return None
+    if 2400 <= frequency_mhz <= 2500:
+        return "2.4GHz"
+    if 5000 <= frequency_mhz <= 6000:
+        return "5GHz"
+    return None
+
+
+def _parse_nmcli_int(value: str) -> Optional[int]:
+    text = value.replace(" MHz", "").strip()
+    if not text or text == "--":
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
 async def _read_nmcli_device_details(interface: str) -> tuple[Optional[str], Optional[str], Optional[int]]:
     proc = await asyncio.create_subprocess_exec(
         "nmcli",
@@ -602,6 +641,93 @@ async def _read_active_wifi_client_connection() -> tuple[Optional[str], Optional
             fallback = candidate
 
     return fallback
+
+
+async def _read_active_wifi_connections() -> list[dict[str, Optional[str]]]:
+    proc = await asyncio.create_subprocess_exec(
+        "nmcli",
+        "-t",
+        "-f",
+        "NAME,TYPE,DEVICE",
+        "connection",
+        "show",
+        "--active",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return []
+
+    configured_client_interface, _ = _get_configured_wifi_interfaces()
+    rows: list[dict[str, Optional[str]]] = []
+
+    for raw_line in stdout.decode(errors="replace").splitlines():
+        fields = _parse_nmcli_row(raw_line)
+        if len(fields) < 3:
+            continue
+
+        name, conn_type, interface = fields[0], fields[1], fields[2]
+        if conn_type != "802-11-wireless" or not interface:
+            continue
+
+        role = "hotspot" if _is_hotspot_connection_name(name) else "client"
+        rows.append(
+            {
+                "connectionName": name or None,
+                "interface": interface,
+                "role": role,
+                "preferred": "true" if role == "client" and interface == configured_client_interface else None,
+            }
+        )
+
+    rows.sort(key=lambda row: (0 if row.get("preferred") else 1, 0 if row.get("role") == "client" else 1))
+    return rows
+
+
+async def _read_wifi_connection_metrics(interface: str) -> dict[str, Any]:
+    cmd = [
+        "nmcli",
+        "-t",
+        "-f",
+        "IN-USE,SSID,SIGNAL,CHAN,FREQ",
+        "device",
+        "wifi",
+        "list",
+        "ifname",
+        interface,
+        "--rescan",
+        "no",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return {}
+
+    for raw_line in stdout.decode(errors="replace").splitlines():
+        parts = _parse_nmcli_row(raw_line)
+        if len(parts) < 1 or parts[0] != "*":
+            continue
+
+        ssid = parts[1] if len(parts) > 1 and parts[1] else None
+        signal_strength = _parse_nmcli_int(parts[2]) if len(parts) > 2 else None
+        channel = _parse_nmcli_int(parts[3]) if len(parts) > 3 else None
+        frequency = _parse_nmcli_int(parts[4]) if len(parts) > 4 else None
+
+        return {
+            "ssid": ssid,
+            "signalStrength": signal_strength,
+            "quality": f"{signal_strength}/100" if signal_strength is not None else None,
+            "channel": channel,
+            "frequency": float(frequency) if frequency is not None else None,
+            "band": _band_from_frequency_mhz(float(frequency)) if frequency is not None else None,
+        }
+
+    return {}
 
 
 async def _list_wifi_adapters() -> list[WifiAdapterInfo]:
@@ -2252,11 +2378,11 @@ async def set_wifi_auto_connect(config: WifiAutoConnectRequest):
 @app.get("/wifi/status", response_model=WifiStatusResponse, dependencies=[Depends(verify_token)])
 async def get_wifi_status():
     """
-    Check current WiFi connection status and SSID.
+    Check current WiFi connection status, signal metrics, and active hotspot/client roles.
     """
     try:
-        connection_name, interface = await _read_active_wifi_client_connection()
-        if not interface:
+        active_connections = await _read_active_wifi_connections()
+        if not active_connections:
             return WifiStatusResponse(
                 connected=False,
                 ssid=None,
@@ -2264,63 +2390,54 @@ async def get_wifi_status():
                 interface=None,
                 ipAddress=None,
                 connectionName=None,
+                signalStrength=None,
+                quality=None,
+                channel=None,
+                frequency=None,
+                connections=[],
             )
 
-        cmd = ["nmcli", "-t", "-f", "IN-USE,SSID,FREQ", "device", "wifi", "list", "ifname", interface]
-        
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        output = stdout.decode().strip()
-        
-        connected_ssid = None
-        band = None 
-        
-        if output:
-            for line in output.split('\n'):
-                # Format: *:SSID:Frequency MHz
-                # Example: *:MyHomeWifi:5240 MHz
-                # Clean up any potential escaping
-                parts = _parse_nmcli_row(line)
-                
-                # Check if this line is the "in-use" one (starts with *)
-                if len(parts) >= 1 and parts[0] == "*":
-                    if len(parts) >= 3:
-                        ssid = parts[1]
-                        
-                        # Filter out hotspot self-connection if needed
-                        if ssid == "Hotspot" or ssid.startswith("pins-") or ssid == "hotspot-ap":
-                             continue
-                             
-                        connected_ssid = ssid
-                        freq_str = parts[2].replace(" MHz", "").strip()
-                        
-                        try:
-                            freq = int(freq_str)
-                            if 2400 <= freq <= 2500:
-                                band = "2.4GHz"
-                            elif 5000 <= freq <= 6000:
-                                band = "5GHz"
-                        except:
-                            pass
-                            
-                    break
+        connection_statuses: list[WifiConnectionStatus] = []
+        primary_client: Optional[WifiConnectionStatus] = None
 
-        if not connected_ssid:
-            connected_ssid = connection_name
+        for active in active_connections:
+            interface = active.get("interface")
+            connection_name = active.get("connectionName")
+            role = active.get("role") or "client"
+            metrics = await _read_wifi_connection_metrics(interface) if interface and role == "client" else {}
+            ip_address = await _read_nmcli_ipv4_address(interface) if interface else None
+            ssid = metrics.get("ssid") or connection_name
 
-        ip_address = await _read_nmcli_ipv4_address(interface)
-        
+            status = WifiConnectionStatus(
+                role=role,
+                connected=True,
+                ssid=ssid,
+                band=metrics.get("band"),
+                interface=interface,
+                ipAddress=ip_address,
+                connectionName=connection_name,
+                signalStrength=metrics.get("signalStrength"),
+                quality=metrics.get("quality"),
+                channel=metrics.get("channel"),
+                frequency=metrics.get("frequency"),
+            )
+            connection_statuses.append(status)
+
+            if role == "client" and primary_client is None:
+                primary_client = status
+
         return WifiStatusResponse(
-            connected=bool(connected_ssid),
-            ssid=connected_ssid,
-            band=band,
-            interface=interface,
-            ipAddress=ip_address,
-            connectionName=connection_name,
+            connected=bool(primary_client),
+            ssid=primary_client.ssid if primary_client else None,
+            band=primary_client.band if primary_client else None,
+            interface=primary_client.interface if primary_client else None,
+            ipAddress=primary_client.ipAddress if primary_client else None,
+            connectionName=primary_client.connectionName if primary_client else None,
+            signalStrength=primary_client.signalStrength if primary_client else None,
+            quality=primary_client.quality if primary_client else None,
+            channel=primary_client.channel if primary_client else None,
+            frequency=primary_client.frequency if primary_client else None,
+            connections=connection_statuses,
         )
         
     except Exception as e:
@@ -2332,6 +2449,11 @@ async def get_wifi_status():
             interface=None,
             ipAddress=None,
             connectionName=None,
+            signalStrength=None,
+            quality=None,
+            channel=None,
+            frequency=None,
+            connections=[],
         )
 
 
