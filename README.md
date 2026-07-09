@@ -208,6 +208,11 @@ Runtime behavior:
 
 Disable Wi-Fi client mode and force hotspot mode.
 
+The fallback hotspot is configured as a local-only NetworkManager shared
+connection. It provides DHCP addressing for access to the device, but suppresses
+DHCP router and DNS options so connected phones keep using LTE/5G for Internet.
+Mobile OSes may show the hotspot Wi-Fi as having no Internet; that is expected.
+
 - **URL**: `POST /wifi/disable`
 - **Response**: `JobResponse` object.
 

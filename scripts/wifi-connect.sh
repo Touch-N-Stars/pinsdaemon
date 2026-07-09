@@ -5,6 +5,8 @@ WIFI_CONFIG_FILE="${WIFI_CONFIG_FILE:-/opt/pinsdaemon/app/wifi_config.json}"
 DEFAULT_HOTSPOT_PASSWORD="touchnstars"
 MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
 DEFAULT_WIFI_INTERFACE="wlan0"
+NM_DNSMASQ_SHARED_DIR="/etc/NetworkManager/dnsmasq-shared.d"
+PINS_LOCAL_ONLY_DHCP_CONF="$NM_DNSMASQ_SHARED_DIR/pins-local-only.conf"
 FORCE_HOTSPOT=false
 CLIENT_IFACE=""
 HOTSPOT_IFACE=""
@@ -107,6 +109,26 @@ is_hotspot_active_on_interface() {
     nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
         | awk -F: -v target_iface="$iface" '$2=="802-11-wireless" && $3==target_iface {print $1}' \
         | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
+}
+
+ensure_local_only_hotspot_dhcp() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "Warning: cannot configure local-only hotspot DHCP without root privileges."
+        return 0
+    fi
+
+    mkdir -p "$NM_DNSMASQ_SHARED_DIR" || {
+        echo "Warning: failed to create $NM_DNSMASQ_SHARED_DIR"
+        return 0
+    }
+
+    cat > "$PINS_LOCAL_ONLY_DHCP_CONF" <<'EOF'
+# PINS fallback hotspot is local-only: hand out an address, but no gateway/DNS.
+# This keeps phones using LTE/5G for Internet while connected to the device AP.
+dhcp-option=3
+dhcp-option=6
+EOF
+    chmod 644 "$PINS_LOCAL_ONLY_DHCP_CONF" || true
 }
 
 if [ -z "$CLIENT_IFACE" ]; then
@@ -242,6 +264,8 @@ PY
 
 enable_hotspot() {
     echo "Connection failed (or forcing hotspot). Re-enabling hotspot..."
+
+    ensure_local_only_hotspot_dhcp
 
     # Ensure client mode is dropped before creating AP mode.
     nmcli device disconnect "$HOTSPOT_IFACE" >/dev/null 2>&1 || true

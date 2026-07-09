@@ -126,6 +126,19 @@ if [ -f "/etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery" ]; then
     chmod 755 /etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery
 fi
 
+# Keep the PINS fallback hotspot local-only. NetworkManager shared mode still
+# serves DHCP, but dnsmasq suppresses router/DNS options so phones keep LTE/5G
+# as their Internet route while connected to the device AP.
+mkdir -p /etc/NetworkManager/dnsmasq-shared.d
+cat > /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf <<'EOF'
+# PINS fallback hotspot is local-only: hand out an address, but no gateway/DNS.
+# This keeps phones using LTE/5G for Internet while connected to the device AP.
+dhcp-option=3
+dhcp-option=6
+EOF
+chown root:root /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf
+chmod 644 /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf
+
 # Ensure service file is owned by root
 chown root:root /etc/systemd/system/sysupdate-api.service
 chmod 644 /etc/systemd/system/sysupdate-api.service

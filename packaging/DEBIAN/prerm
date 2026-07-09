@@ -20,6 +20,10 @@ if id "pi" >/dev/null 2>&1; then
 	su - pi -c "XDG_RUNTIME_DIR=/run/user/${PI_UID} systemctl --user stop gvfs-gphoto2-volume-monitor.service" || true
 fi
 
+if [ "$1" = "remove" ]; then
+	rm -f /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf
+fi
+
 # Remove logs or temp files if needed
 # rm -rf /opt/pinsdaemon/venv
 
