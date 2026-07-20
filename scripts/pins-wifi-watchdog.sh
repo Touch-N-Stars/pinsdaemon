@@ -51,7 +51,7 @@ default_iface = sys.argv[2]
 valid = re.compile(r"^[A-Za-z0-9._-]+$")
 
 client = default_iface
-hotspot = default_iface
+hotspot = None
 
 if os.path.exists(path):
     try:
