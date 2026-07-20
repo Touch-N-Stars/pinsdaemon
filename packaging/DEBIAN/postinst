@@ -75,6 +75,11 @@ if [ -f "/usr/local/bin/collect-diagnostics.sh" ]; then
     chmod 755 /usr/local/bin/collect-diagnostics.sh
 fi
 
+if [ -f "/usr/local/bin/pins-wifi-watchdog.sh" ]; then
+    chown root:root /usr/local/bin/pins-wifi-watchdog.sh
+    chmod 755 /usr/local/bin/pins-wifi-watchdog.sh
+fi
+
 if [ -f "/home/pi/pins-scripts/hotspot.sh" ]; then
     chown pi:pi /home/pi/pins-scripts/hotspot.sh
     chmod 755 /home/pi/pins-scripts/hotspot.sh
@@ -143,6 +148,16 @@ chmod 644 /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf
 chown root:root /etc/systemd/system/sysupdate-api.service
 chmod 644 /etc/systemd/system/sysupdate-api.service
 
+# Ensure Wi-Fi watchdog timer/service files are owned by root
+if [ -f "/etc/systemd/system/pins-wifi-watchdog.service" ]; then
+    chown root:root /etc/systemd/system/pins-wifi-watchdog.service
+    chmod 644 /etc/systemd/system/pins-wifi-watchdog.service
+fi
+if [ -f "/etc/systemd/system/pins-wifi-watchdog.timer" ]; then
+    chown root:root /etc/systemd/system/pins-wifi-watchdog.timer
+    chmod 644 /etc/systemd/system/pins-wifi-watchdog.timer
+fi
+
 # Ensure ASI udev rules file has correct ownership and mode
 if [ -f "/lib/udev/rules.d/99-asi.rules" ]; then
     chown root:root /lib/udev/rules.d/99-asi.rules
@@ -169,6 +184,14 @@ chown -R sysupdate-api:sysupdate-api /opt/pinsdaemon/venv
 systemctl daemon-reload
 systemctl enable sysupdate-api
 systemctl restart sysupdate-api
+
+# Active Wi-Fi connectivity watchdog: catches the case where NetworkManager
+# never fires a dispatcher event (e.g. the client interface still reports
+# "connected" while the router/AP behind it is actually dead), which
+# otherwise leaves 90-pins-wifi-recovery never invoked.
+if [ -f "/etc/systemd/system/pins-wifi-watchdog.timer" ]; then
+    systemctl enable --now pins-wifi-watchdog.timer
+fi
 
 # Prevent gvfs camera monitor from being auto-started by user sessions.
 # Apply a global user-unit mask and best-effort stop/mask for pi's current session.
