@@ -125,7 +125,8 @@ fi
 
 gateway_reachable() {
     local gateway
-    gateway="$(ip -4 route show dev "$CLIENT_IFACE" default 2>/dev/null | awk '{print $3; exit}')"
+    gateway="
+$(ip -4 route show dev "$CLIENT_IFACE" default 2>/dev/null | awk '/via/ {print $3; exit}')"
     if [[ -z "$gateway" ]]; then
         # No default route on the client interface at all: not connected.
         return 1
