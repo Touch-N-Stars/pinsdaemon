@@ -125,10 +125,10 @@ fi
 
 gateway_reachable() {
     local gateway
-    gateway="
-$(ip -4 route show dev "$CLIENT_IFACE" default 2>/dev/null | awk '/via/ {print $3; exit}')"
+    gateway="$(ip -4 route show dev "$CLIENT_IFACE" default 2>/dev/null | awk '/via/ {print $3; exit}')"
     if [[ -z "$gateway" ]]; then
-        # No default route on the client interface at all: not connected.
+        # No default route (or no gateway on the default route) on the
+        # client interface: not usably connected.
         return 1
     fi
     ping -I "$CLIENT_IFACE" -c 1 -W "$PING_TIMEOUT_SECONDS" "$gateway" >/dev/null 2>&1
