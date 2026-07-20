@@ -36,7 +36,12 @@ log() {
     local message="$*"
     logger -t "$LOG_TAG" "$message"
     prune_local_logs
-    printf "%s %s\n" "$(date --iso-8601=seconds)" "$message" >>"$LOCAL_LOG_DIR/wifi-watchdog-$(date +%F).log" 2>/dev/null || true
+    local log_file="$LOCAL_LOG_DIR/wifi-watchdog-$(date +%F).log"
+    printf "%s %s\n" "$(date --iso-8601=seconds)" "$message" >>"$log_file" 2>/dev/null || true
+    # This script runs as root; keep the log readable/owned by the daemon user
+    # that packages diagnostics.
+    chown sysupdate-api:sysupdate-api "$log_file" 2>/dev/null || true
+    chmod 644 "$log_file" 2>/dev/null || true
 }
 
 read_configured_interfaces() {
