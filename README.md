@@ -66,6 +66,9 @@ graph TD
 
   NM[NetworkManager Dispatcher] --> WifiRecovery[90-pins-wifi-recovery]
   WifiRecovery -->|Reconnect / fallback| WifiConnect
+
+  Timer[pins-wifi-watchdog.timer, every 30s] --> Watchdog[pins-wifi-watchdog.sh]
+  Watchdog -->|Ping gateway; fallback after N failures| WifiConnect
 ```
 
 The daemon provides a facade over system shell scripts. Long-running tasks (like upgrades or Wi-Fi connections) are executed asynchronously as "Jobs". Clients receive a `Job ID` immediately and can use it to poll status or stream logs via WebSockets.
@@ -187,10 +190,11 @@ Get a list of available Wi-Fi networks.
 Connect to a specific Wi-Fi network. If connection fails, it automatically reverts to Hotspot mode.
 
 Runtime behavior:
-- A NetworkManager dispatcher hook monitors disconnect/change events on the configured client/hotspot interfaces.
+- A NetworkManager dispatcher hook (`90-pins-wifi-recovery`) monitors disconnect/change events on the configured client/hotspot interfaces.
 - It retries reconnection to the configured auto-connect SSID (default: 3 attempts, 5s backoff).
 - If retries fail, it enables the device hotspot automatically.
 - The fallback hotspot profile uses a higher NetworkManager autoconnect priority than default client Wi-Fi profiles so the device remains reachable instead of bouncing between a flaky client network and hotspot mode.
+- Independently, `pins-wifi-watchdog.timer` runs `pins-wifi-watchdog.sh` every 30s to actively ping the client interface's default gateway. This does not depend on NetworkManager deciding a disconnect happened: it covers the case where the Wi-Fi client stays reported as "connected" while the router/AP behind it is actually unreachable, which never fires a dispatcher event and would otherwise leave the device stranded. After 5 consecutive failed checks (~2.5 minutes) it forces the fallback hotspot the same way the dispatcher hook does.
 
 - **URL**: `POST /wifi/connect`
 - **Body**:

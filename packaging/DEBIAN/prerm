@@ -5,6 +5,10 @@ set -e
 systemctl stop sysupdate-api || true
 systemctl disable sysupdate-api || true
 
+# Stop Wi-Fi watchdog timer
+systemctl stop pins-wifi-watchdog.timer || true
+systemctl disable pins-wifi-watchdog.timer || true
+
 # During upgrade/removal, stop PINS service first if it is running.
 if systemctl is-active --quiet pins.service; then
 	systemctl stop pins.service || true

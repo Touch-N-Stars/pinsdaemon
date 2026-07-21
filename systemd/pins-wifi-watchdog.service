@@ -1,0 +1,8 @@
+[Unit]
+Description=PINS Wi-Fi fallback hotspot watchdog (one-shot check)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pins-wifi-watchdog.sh

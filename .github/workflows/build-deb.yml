@@ -47,6 +47,7 @@ jobs:
         cp scripts/wifi-automanage.py build/usr/local/bin/
         cp scripts/wifi-scan.py build/usr/local/bin/
         cp scripts/collect-diagnostics.sh build/usr/local/bin/
+        cp scripts/pins-wifi-watchdog.sh build/usr/local/bin/
 
         # NetworkManager runtime recovery hook
         cp scripts/90-pins-wifi-recovery build/etc/NetworkManager/dispatcher.d/
@@ -54,9 +55,11 @@ jobs:
 
         # Hotspot hook script
         cp scripts/hotspot.sh build/home/pi/pins-scripts/
-        
+
         # Systemd
         cp systemd/sysupdate-api.service build/etc/systemd/system/
+        cp systemd/pins-wifi-watchdog.service build/etc/systemd/system/
+        cp systemd/pins-wifi-watchdog.timer build/etc/systemd/system/
         
         # Sudoers
         cp packaging/sudoers build/etc/sudoers.d/sysupdate-api
