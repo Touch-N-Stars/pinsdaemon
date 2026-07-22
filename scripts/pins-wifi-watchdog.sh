@@ -22,9 +22,9 @@ DEFAULT_WIFI_INTERFACE="wlan0"
 LOCAL_LOG_DIR="${PINSDAEMON_LOG_DIR:-/opt/pinsdaemon/logs}"
 LOCAL_LOG_RETENTION_DAYS="${PINSDAEMON_LOG_RETENTION_DAYS:-5}"
 
-# At the default 30s timer interval, 5 consecutive failures is ~2.5 minutes
+# At the default 30s timer interval, 2 consecutive failures is ~1 minute
 # of sustained unreachability before falling back, absorbing transient blips.
-MAX_FAILURES="${PINS_WIFI_WATCHDOG_MAX_FAILURES:-5}"
+MAX_FAILURES="${PINS_WIFI_WATCHDOG_MAX_FAILURES:-2}"
 PING_TIMEOUT_SECONDS="${PINS_WIFI_WATCHDOG_PING_TIMEOUT:-2}"
 
 prune_local_logs() {
