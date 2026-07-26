@@ -15,11 +15,20 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+        cache: pip
+
+    - name: Install Python dependencies
+      run: python -m pip install --disable-pip-version-check -r requirements.txt
 
     - name: Validate Wi-Fi recovery and shell scripts
       run: |
-        python3 -m unittest discover -s tests -p 'test_*.py' -v
+        python -m unittest discover -s tests -p 'test_*.py' -v
         bash -n scripts/*.sh scripts/90-pins-wifi-recovery packaging/DEBIAN/postinst packaging/DEBIAN/prerm
     
     - name: Set up directory structure
