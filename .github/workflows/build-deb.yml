@@ -16,6 +16,11 @@ jobs:
     
     steps:
     - uses: actions/checkout@v4
+
+    - name: Validate Wi-Fi recovery and shell scripts
+      run: |
+        python3 -m unittest discover -s tests -p 'test_*.py' -v
+        bash -n scripts/*.sh scripts/90-pins-wifi-recovery packaging/DEBIAN/postinst packaging/DEBIAN/prerm
     
     - name: Set up directory structure
       run: |
@@ -23,6 +28,8 @@ jobs:
         mkdir -p build/usr/local/bin
         mkdir -p build/etc/systemd/system
         mkdir -p build/etc/NetworkManager/dispatcher.d
+        mkdir -p build/etc/systemd/journald.conf.d
+        mkdir -p build/etc/avahi/services
         mkdir -p build/etc/sudoers.d
         mkdir -p build/home/pi/pins-scripts
         mkdir -p build/lib/udev/rules.d
@@ -60,6 +67,8 @@ jobs:
         cp systemd/sysupdate-api.service build/etc/systemd/system/
         cp systemd/pins-wifi-watchdog.service build/etc/systemd/system/
         cp systemd/pins-wifi-watchdog.timer build/etc/systemd/system/
+        cp packaging/journald-persistent.conf build/etc/systemd/journald.conf.d/90-pins-persistent.conf
+        cp packaging/pinsdaemon.service build/etc/avahi/services/pinsdaemon.service
         
         # Sudoers
         cp packaging/sudoers build/etc/sudoers.d/sysupdate-api

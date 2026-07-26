@@ -18,6 +18,8 @@ CONFIG_PATHS = [
 
 WIFI_CONNECT_SCRIPT = os.path.join(os.path.dirname(__file__), "wifi-connect.sh")
 DEFAULT_WIFI_INTERFACE = "wlan0"
+NETWORK_MODE_AUTO = "auto"
+NETWORK_MODE_HOTSPOT = "hotspot"
 _IFACE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -111,6 +113,12 @@ def main():
     
     if not config:
         print("No wifi configuration found.")
+        start_hotspot(client_interface, hotspot_interface)
+        return
+
+    desired_mode = str(config.get("desired_mode", NETWORK_MODE_AUTO)).strip().lower()
+    if desired_mode == NETWORK_MODE_HOTSPOT:
+        print("Persistent hotspot mode is selected; skipping client Wi-Fi.")
         start_hotspot(client_interface, hotspot_interface)
         return
 
