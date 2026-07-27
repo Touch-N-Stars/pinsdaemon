@@ -65,6 +65,11 @@ if [ -f "/usr/local/bin/wifi-connect.sh" ]; then
     chmod 755 /usr/local/bin/wifi-connect.sh
 fi
 
+if [ -f "/usr/local/bin/pins-rig-name" ]; then
+    chown root:root /usr/local/bin/pins-rig-name
+    chmod 755 /usr/local/bin/pins-rig-name
+fi
+
 if [ -f "/usr/local/bin/wifi-automanage.py" ]; then
     chown root:root /usr/local/bin/wifi-automanage.py
     chmod 755 /usr/local/bin/wifi-automanage.py
@@ -174,10 +179,29 @@ if [ -f "/etc/systemd/journald.conf.d/90-pins-persistent.conf" ]; then
     journalctl --flush || true
 fi
 
+# Use the same stable, hardware-derived name for the OS/mDNS hostname and the
+# fallback hotspot SSID. Avahi conflict suffixes such as pins-2.local are then
+# avoided when several PINS rigs share a LAN.
+if [ -x "/usr/local/bin/pins-rig-name" ]; then
+    PINS_RIG_NAME=$(/usr/local/bin/pins-rig-name --ensure)
+    CURRENT_HOSTNAME=$(hostname 2>/dev/null || true)
+    if [ "$CURRENT_HOSTNAME" != "$PINS_RIG_NAME" ]; then
+        hostnamectl set-hostname "$PINS_RIG_NAME"
+        if [ -f /etc/hosts ]; then
+            if grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+                sed -i "s/^127\\.0\\.1\\.1.*/127.0.1.1 ${PINS_RIG_NAME}/" /etc/hosts
+            else
+                printf '127.0.1.1 %s\n' "$PINS_RIG_NAME" >> /etc/hosts
+            fi
+        fi
+    fi
+fi
+
 if [ -f "/etc/avahi/services/pinsdaemon.service" ]; then
     chown root:root /etc/avahi/services/pinsdaemon.service
     chmod 644 /etc/avahi/services/pinsdaemon.service
     systemctl enable --now avahi-daemon || true
+    systemctl restart avahi-daemon || true
 fi
 
 # Ensure ASI udev rules file has correct ownership and mode

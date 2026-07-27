@@ -75,6 +75,19 @@ class WifiModeHelpersTests(unittest.TestCase):
         with patch.dict("os.environ", {"PINS_RIG_ID": "My Field Rig!"}):
             self.assertEqual(main._get_rig_id(), "my-field-rig")
 
+    def test_persisted_rig_name_is_the_api_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rig_name_file = Path(temp_dir) / "rig-name"
+            rig_name_file.write_text("pins-ce29c\n", encoding="utf-8")
+            with patch.dict(
+                "os.environ",
+                {
+                    "PINS_RIG_ID": "",
+                    "PINS_RIG_NAME_FILE": str(rig_name_file),
+                },
+            ):
+                self.assertEqual(main._get_rig_id(), "pins-ce29c")
+
 
 class WifiModeApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_set_hotspot_mode_persists_intent_before_starting_job(self):

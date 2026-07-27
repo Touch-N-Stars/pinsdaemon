@@ -6,6 +6,7 @@ DEFAULT_HOTSPOT_PASSWORD="touchnstars"
 COORDINATION_LOCK_FILE="/run/pins-wifi-coordination.lock"
 COORDINATION_LOCK_WAIT_SECONDS="${PINS_WIFI_COORDINATION_LOCK_WAIT_SECONDS:-30}"
 DEFAULT_WIFI_INTERFACE="wlan0"
+RIG_NAME_COMMAND="${PINS_RIG_NAME_COMMAND:-/usr/local/bin/pins-rig-name}"
 NM_DNSMASQ_SHARED_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 PINS_LOCAL_ONLY_DHCP_CONF="$NM_DNSMASQ_SHARED_DIR/pins-local-only.conf"
 HOTSPOT_IPV4_CIDR="${PINS_HOTSPOT_IPV4_CIDR:-10.42.0.1/24}"
@@ -313,19 +314,16 @@ enable_hotspot() {
         done <<< "$existing_hotspots"
     fi
     
-    # Get CPU ID for unique SSID
-    CPU_ID="0000"
-    if [ -f /proc/cpuinfo ]; then
-        # Use user provided logic to extract serial
-        CPU_ID=$(grep Serial /proc/cpuinfo | awk '{print substr($3, length($3)-4)}')
+    # The hotspot SSID and mDNS hostname share one persisted hardware identity.
+    # This makes each rig unambiguous on networks containing multiple PINS units.
+    if [ -x "$RIG_NAME_COMMAND" ]; then
+        HOTSPOT_SSID="$("$RIG_NAME_COMMAND")"
+    else
+        CPU_ID="$(sed -n 's/^Serial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null \
+            | tr -cd '0-9A-Fa-f' | sed 's/.*\(.....\)$/\1/')"
+        [ -n "$CPU_ID" ] || CPU_ID="00000"
+        HOTSPOT_SSID="pins-$(printf '%s' "$CPU_ID" | tr '[:upper:]' '[:lower:]')"
     fi
-    
-    # Fallback if empty
-    if [ -z "$CPU_ID" ]; then
-        CPU_ID="0000"
-    fi
-
-    HOTSPOT_SSID="pins-$CPU_ID"
     HOTSPOT_PASSWORD="$(get_hotspot_password)"
     HOTSPOT_BAND="$(get_hotspot_band)"
     HOTSPOT_CHANNEL="$(get_hotspot_channel)"

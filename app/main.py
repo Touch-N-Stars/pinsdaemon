@@ -452,6 +452,16 @@ def _get_rig_id() -> str:
         if candidate:
             return candidate
 
+    rig_name_file = os.getenv("PINS_RIG_NAME_FILE", "/etc/pins/rig-name")
+    try:
+        with open(rig_name_file, "r", encoding="utf-8") as f:
+            candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", f.readline().strip())
+        candidate = candidate.strip("-").lower()[:63]
+        if candidate:
+            return candidate
+    except OSError:
+        pass
+
     suffix = ""
     try:
         with open("/proc/cpuinfo", "r", encoding="utf-8") as f:

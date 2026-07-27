@@ -103,6 +103,21 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         )
         self.assertIn("<type>_pinsdaemon._tcp</type>", avahi_service)
         self.assertIn("<port>8000</port>", avahi_service)
+        self.assertIn("<name replace-wildcards=\"yes\">%h</name>", avahi_service)
+        self.assertIn("<txt-record>backendPort=5000</txt-record>", avahi_service)
+
+    def test_hotspot_and_mdns_share_the_persisted_rig_name(self):
+        workflow = self.read(REPO_ROOT / ".github" / "workflows" / "build-deb.yml")
+        postinst = self.read(REPO_ROOT / "packaging" / "DEBIAN" / "postinst")
+        wifi_connect = self.read(WIFI_CONNECT)
+        rig_name = self.read(REPO_ROOT / "scripts" / "pins-rig-name")
+
+        self.assertIn("cp scripts/pins-rig-name build/usr/local/bin/", workflow)
+        self.assertIn("bash -n scripts/*.sh scripts/pins-rig-name", workflow)
+        self.assertIn('HOTSPOT_SSID="$("$RIG_NAME_COMMAND")"', wifi_connect)
+        self.assertIn("/usr/local/bin/pins-rig-name --ensure", postinst)
+        self.assertIn('hostnamectl set-hostname "$PINS_RIG_NAME"', postinst)
+        self.assertIn("/etc/pins/rig-name", rig_name)
 
     def test_legacy_private_directory_locks_are_removed(self):
         watchdog = self.read(WATCHDOG)

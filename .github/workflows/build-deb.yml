@@ -29,7 +29,7 @@ jobs:
     - name: Validate Wi-Fi recovery and shell scripts
       run: |
         python -m unittest discover -s tests -p 'test_*.py' -v
-        bash -n scripts/*.sh scripts/90-pins-wifi-recovery packaging/DEBIAN/postinst packaging/DEBIAN/prerm
+        bash -n scripts/*.sh scripts/pins-rig-name scripts/90-pins-wifi-recovery packaging/DEBIAN/postinst packaging/DEBIAN/prerm
     
     - name: Set up directory structure
       run: |
@@ -59,6 +59,7 @@ jobs:
         cp scripts/ensure-required-packages.sh build/usr/local/bin/
         cp scripts/manage-plugin.sh build/usr/local/bin/
         cp scripts/manage-samba.sh build/usr/local/bin/
+        cp scripts/pins-rig-name build/usr/local/bin/
         cp scripts/wifi-connect.sh build/usr/local/bin/
         cp scripts/wifi-automanage.py build/usr/local/bin/
         cp scripts/wifi-scan.py build/usr/local/bin/
