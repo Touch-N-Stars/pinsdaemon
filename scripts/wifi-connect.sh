@@ -3,10 +3,13 @@
 HOTSPOT_CONFIG_FILE="${HOTSPOT_CONFIG_FILE:-/opt/pinsdaemon/app/hotspot_config.json}"
 WIFI_CONFIG_FILE="${WIFI_CONFIG_FILE:-/opt/pinsdaemon/app/wifi_config.json}"
 DEFAULT_HOTSPOT_PASSWORD="touchnstars"
-MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
+COORDINATION_LOCK_FILE="/run/pins-wifi-coordination.lock"
+COORDINATION_LOCK_WAIT_SECONDS="${PINS_WIFI_COORDINATION_LOCK_WAIT_SECONDS:-30}"
 DEFAULT_WIFI_INTERFACE="wlan0"
 NM_DNSMASQ_SHARED_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 PINS_LOCAL_ONLY_DHCP_CONF="$NM_DNSMASQ_SHARED_DIR/pins-local-only.conf"
+HOTSPOT_IPV4_CIDR="${PINS_HOTSPOT_IPV4_CIDR:-10.42.0.1/24}"
+HOTSPOT_IPV4_ADDRESS="${HOTSPOT_IPV4_CIDR%%/*}"
 FORCE_HOTSPOT=false
 CLIENT_IFACE=""
 HOTSPOT_IFACE=""
@@ -111,6 +114,13 @@ is_hotspot_active_on_interface() {
         | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
 }
 
+hotspot_postcondition_met() {
+    local iface="$1"
+    is_hotspot_active_on_interface "$iface" || return 1
+    nmcli -g IP4.ADDRESS device show "$iface" 2>/dev/null \
+        | grep -qE "^${HOTSPOT_IPV4_ADDRESS//./\\.}/[0-9]+$"
+}
+
 ensure_local_only_hotspot_dhcp() {
     if [ "$(id -u)" -ne 0 ]; then
         echo "Warning: cannot configure local-only hotspot DHCP without root privileges."
@@ -173,8 +183,31 @@ if [ "$FORCE_HOTSPOT" = true ]; then
     echo "Hotspot mode requested explicitly."
 fi
 
-touch "$MANUAL_CONNECT_LOCK_FILE" 2>/dev/null || true
-trap 'rm -f "$MANUAL_CONNECT_LOCK_FILE"' EXIT
+# Recovery callers already hold descriptor 9 for this lock. Manual/API calls
+# wait briefly for an in-flight recovery operation rather than issuing
+# competing nmcli commands on the same radio.
+if ! [[ "$COORDINATION_LOCK_WAIT_SECONDS" =~ ^[0-9]+$ ]]; then
+    COORDINATION_LOCK_WAIT_SECONDS=30
+fi
+
+INHERITED_COORDINATION_LOCK=false
+if [ "${PINS_WIFI_COORDINATION_LOCK_HELD:-0}" = "1" ] \
+    && [ -e "/proc/$$/fd/9" ] \
+    && [ "$(readlink -f "/proc/$$/fd/9" 2>/dev/null || true)" = "$(readlink -f "$COORDINATION_LOCK_FILE" 2>/dev/null || true)" ]; then
+    INHERITED_COORDINATION_LOCK=true
+fi
+
+if [ "$INHERITED_COORDINATION_LOCK" != true ]; then
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "Error: cannot coordinate Wi-Fi operation because flock is unavailable."
+        exit 1
+    fi
+    exec 9>"$COORDINATION_LOCK_FILE"
+    if ! flock -w "$COORDINATION_LOCK_WAIT_SECONDS" 9; then
+        echo "Error: another Wi-Fi recovery operation is still in progress."
+        exit 1
+    fi
+fi
 
 get_hotspot_password() {
     local hotspot_password="$DEFAULT_HOTSPOT_PASSWORD"
@@ -327,6 +360,7 @@ enable_hotspot() {
             PROFILE_CANDIDATES+=("$NEW_CONN")
         fi
         PROFILE_CANDIDATES+=("hotspot-ap" "Hotspot")
+        PROFILE_CONFIGURED=0
 
         for conn in "${PROFILE_CANDIDATES[@]}"; do
             if nmcli connection show "$conn" >/dev/null 2>&1; then
@@ -337,8 +371,14 @@ enable_hotspot() {
                 # client profiles pull the single Wi-Fi adapter away again, causing
                 # client/hotspot bounce loops on flaky phone hotspots.
                 nmcli connection modify "$conn" connection.autoconnect-priority 100 || true
-                nmcli connection modify "$conn" 802-11-wireless.mode ap || true
-                nmcli connection modify "$conn" ipv4.method shared || true
+                if ! nmcli connection modify "$conn" 802-11-wireless.mode ap; then
+                    echo "Failed to configure AP mode on hotspot profile."
+                    return 1
+                fi
+                if ! nmcli connection modify "$conn" ipv4.method shared ipv4.addresses "$HOTSPOT_IPV4_CIDR"; then
+                    echo "Failed to configure fixed hotspot address $HOTSPOT_IPV4_CIDR."
+                    return 1
+                fi
                 nmcli connection modify "$conn" ipv6.method disabled || true
                 nmcli connection modify "$conn" wifi-sec.key-mgmt wpa-psk || true
                 nmcli connection modify "$conn" wifi-sec.psk "$HOTSPOT_PASSWORD" || true
@@ -349,19 +389,38 @@ enable_hotspot() {
                 if [ -n "$HOTSPOT_CHANNEL" ]; then
                     nmcli connection modify "$conn" 802-11-wireless.channel "$HOTSPOT_CHANNEL" || true
                 fi
-                if [ -n "$HOTSPOT_BAND" ] || [ -n "$HOTSPOT_CHANNEL" ]; then
-                    nmcli connection up "$conn" ifname "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
+                if ! nmcli connection up "$conn" ifname "$HOTSPOT_IFACE" >/dev/null 2>&1; then
+                    echo "Failed to reactivate configured hotspot profile."
+                    return 1
                 fi
+                PROFILE_CONFIGURED=1
                 break
             fi
         done
+        if [ "$PROFILE_CONFIGURED" -ne 1 ]; then
+            echo "Could not identify the hotspot connection profile."
+            return 1
+        fi
 
         # Extra safeguard: also disable kernel powersave flag for this device
         if command -v iw >/dev/null 2>&1; then
             iw dev "$HOTSPOT_IFACE" set power_save off || true
         fi
         
-        echo "Hotspot enabled successfully."
+        HOTSPOT_VERIFIED=0
+        for _ in 1 2 3 4 5; do
+            if hotspot_postcondition_met "$HOTSPOT_IFACE"; then
+                HOTSPOT_VERIFIED=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$HOTSPOT_VERIFIED" -ne 1 ]; then
+            echo "Hotspot activation did not reach the required AP/IP postcondition."
+            return 1
+        fi
+
+        echo "Hotspot enabled successfully at $HOTSPOT_IPV4_ADDRESS."
     else
         echo "Failed to enable hotspot."
         return 1

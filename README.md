@@ -73,6 +73,11 @@ graph TD
 
 The daemon provides a facade over system shell scripts. Long-running tasks (like upgrades or Wi-Fi connections) are executed asynchronously as "Jobs". Clients receive a `Job ID` immediately and can use it to poll status or stream logs via WebSockets.
 
+`GET /health` is an unauthenticated, read-only discovery endpoint. It returns a
+stable `rigId`, service name, and API version without exposing configuration or
+credentials. Debian installations also advertise `_pinsdaemon._tcp` through
+Avahi/mDNS on port 8000.
+
 ## API Endpoints
 
 All HTTP endpoints require the `Authorization: Bearer <token>` header.
@@ -194,7 +199,10 @@ Runtime behavior:
 - It retries reconnection to the configured auto-connect SSID (default: 3 attempts, 5s backoff).
 - If retries fail, it enables the device hotspot automatically.
 - The fallback hotspot profile uses a higher NetworkManager autoconnect priority than default client Wi-Fi profiles so the device remains reachable instead of bouncing between a flaky client network and hotspot mode.
-- Independently, `pins-wifi-watchdog.timer` runs `pins-wifi-watchdog.sh` every 10s to actively ping the client interface's default gateway. This does not depend on NetworkManager deciding a disconnect happened: it covers the case where the Wi-Fi client stays reported as "connected" while the router/AP behind it is actually unreachable, which never fires a dispatcher event and would otherwise leave the device stranded. After 3 consecutive failed checks (~30 seconds) it forces the fallback hotspot the same way the dispatcher hook does.
+- `pins-wifi-watchdog.timer` also runs `pins-wifi-watchdog.sh` every 10s to actively ping the client interface's default gateway. This does not depend on NetworkManager deciding a disconnect happened: it covers the case where the Wi-Fi client stays reported as "connected" while the router/AP behind it is actually unreachable, which never fires a dispatcher event and would otherwise leave the device stranded. After 3 consecutive failed checks (~30 seconds) it forces the fallback hotspot the same way the dispatcher hook does.
+- The dispatcher, watchdog, and manual/API Wi-Fi connection path share `/run/pins-wifi-coordination.lock`. A kernel-managed exclusive lock serializes their complete NetworkManager operations so client and hotspot activation cannot race on a single Wi-Fi radio.
+- Recovery state transitions are written to the daily on-disk Wi-Fi logs, including restored client connectivity, confirmed hotspot activation, and failed hotspot attempts.
+- The Debian package enables persistent systemd journal storage through `/etc/systemd/journald.conf.d/90-pins-persistent.conf`, so NetworkManager and service logs remain available after reboot.
 
 - **URL**: `POST /wifi/connect`
 - **Body**:
@@ -216,11 +224,59 @@ The fallback hotspot is configured as a local-only NetworkManager shared
 connection. It provides DHCP addressing for access to the device, but suppresses
 DHCP router and DNS options so connected phones keep using LTE/5G for Internet.
 Mobile OSes may show the hotspot Wi-Fi as having no Internet; that is expected.
+The hotspot uses the fixed management address `10.42.0.1/24`. Activation is not
+reported as successful until NetworkManager reports an active AP on the selected
+interface with that IPv4 address.
 
 - **URL**: `POST /wifi/disable`
 - **Response**: `JobResponse` object.
 
-### 8. Wi-Fi Auto-Connect
+For backward compatibility this endpoint now selects persistent `hotspot` mode.
+The rig remains in hotspot mode after reboot until a client connection is requested
+or `PUT /wifi/mode` selects `auto`.
+
+### 8. Network Mode
+
+Network intent is persisted separately from observed NetworkManager state.
+
+- **URL**: `GET /wifi/mode`
+- **Response**:
+  ```json
+  {
+    "desiredMode": "hotspot",
+    "observedMode": "hotspot",
+    "availableModes": ["auto", "hotspot"]
+  }
+  ```
+
+- **URL**: `PUT /wifi/mode`
+- **Body**:
+  ```json
+  {
+    "desiredMode": "auto"
+  }
+  ```
+- **Response**:
+  ```json
+  {
+    "desiredMode": "auto",
+    "job": {
+      "jobId": "...",
+      "status": "pending",
+      "exitCode": null,
+      "startedAt": 0,
+      "finishedAt": null,
+      "command": "..."
+    }
+  }
+  ```
+
+`auto` tries the saved auto-connect SSID and falls back to the hotspot. Once the
+fallback hotspot is active, recovery checks leave it active instead of repeatedly
+taking a single radio away from connected field clients. `hotspot` skips client
+reconnection and continuously reconciles toward the AP state.
+
+### 9. Wi-Fi Auto-Connect
 
 - **URL**: `GET /wifi/auto-connect`
 - **Response**:
@@ -242,9 +298,11 @@ Mobile OSes may show the hotspot Wi-Fi as having no Internet; that is expected.
   }
   ```
 
-### 9. Wi-Fi Status
+### 10. Wi-Fi Status
 
 Return whether device is connected to Wi-Fi and detect active band, signal metrics, and active client/hotspot roles.
+The response also includes `desiredMode` and `observedMode`. Observed mode is one
+of `disconnected`, `client`, `hotspot`, `dual`, or `unknown`.
 
 - **URL**: `GET /wifi/status`
 - **Response**:
@@ -291,7 +349,7 @@ Return whether device is connected to Wi-Fi and detect active band, signal metri
   }
   ```
 
-### 10. Hotspot Password
+### 11. Hotspot Password
 
 Get hotspot configuration status without exposing the password value.
 
@@ -343,7 +401,7 @@ Alias endpoint for the same update behavior:
 
 - **URL**: `POST /wifi/hotspot/settings`
 
-### 11. System Temperature
+### 12. System Temperature
 
 - **URL**: `GET /system/temperature`
 - **Response**:

@@ -11,12 +11,10 @@ set -euo pipefail
 # hotspot never comes up. This script is invoked on a fixed timer instead, so
 # it does not depend on NetworkManager noticing anything.
 
-LOCK_DIR="/run/pins-wifi-watchdog.lock"
-DISPATCHER_LOCK_DIR="/run/pins-wifi-recovery.lock"
+COORDINATION_LOCK_FILE="/run/pins-wifi-coordination.lock"
 STATE_FILE="/run/pins-wifi-watchdog.failures"
 WIFI_CONFIG_FILE="/opt/pinsdaemon/app/wifi_config.json"
 WIFI_CONNECT_SCRIPT="/usr/local/bin/wifi-connect.sh"
-MANUAL_CONNECT_LOCK_FILE="/run/pins-wifi-connect.lock"
 LOG_TAG="pins-wifi-watchdog"
 DEFAULT_WIFI_INTERFACE="wlan0"
 LOCAL_LOG_DIR="${PINSDAEMON_LOG_DIR:-/opt/pinsdaemon/logs}"
@@ -57,6 +55,7 @@ valid = re.compile(r"^[A-Za-z0-9._-]+$")
 
 client = default_iface
 hotspot = None
+desired_mode = "auto"
 
 if os.path.exists(path):
     try:
@@ -65,6 +64,7 @@ if os.path.exists(path):
         if isinstance(data, dict):
             candidate_client = data.get("client_interface")
             candidate_hotspot = data.get("hotspot_interface")
+            candidate_mode = data.get("desired_mode")
             if isinstance(candidate_client, str):
                 candidate_client = candidate_client.strip()
                 if valid.fullmatch(candidate_client):
@@ -73,6 +73,8 @@ if os.path.exists(path):
                 candidate_hotspot = candidate_hotspot.strip()
                 if valid.fullmatch(candidate_hotspot):
                     hotspot = candidate_hotspot
+            if isinstance(candidate_mode, str) and candidate_mode.strip().lower() in {"auto", "hotspot"}:
+                desired_mode = candidate_mode.strip().lower()
     except Exception:
         pass
 
@@ -81,27 +83,26 @@ if not hotspot:
 
 print(client)
 print(hotspot)
+print(desired_mode)
 PY
 }
 
 mapfile -t IFACES < <(read_configured_interfaces)
 CLIENT_IFACE="${IFACES[0]:-$DEFAULT_WIFI_INTERFACE}"
 HOTSPOT_IFACE="${IFACES[1]:-$CLIENT_IFACE}"
+DESIRED_MODE="${IFACES[2]:-auto}"
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    # Previous run still in flight (should not happen at 10s cadence with a
-    # short ping timeout, but avoid overlapping runs just in case).
-    exit 0
-fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
-
-if [[ -d "$DISPATCHER_LOCK_DIR" ]]; then
-    # 90-pins-wifi-recovery is actively handling a transition; don't race it.
+if ! command -v flock >/dev/null 2>&1; then
+    log "Cannot run Wi-Fi watchdog safely: flock is unavailable"
     exit 0
 fi
 
-if [[ -f "$MANUAL_CONNECT_LOCK_FILE" ]]; then
-    # Manual wifi-connect run is in progress; avoid competing NM operations.
+# The dispatcher and manual/API Wi-Fi path use this same kernel-managed lock.
+# Holding it for the entire check and recovery operation prevents a client
+# activation from racing an AP activation on a single Wi-Fi radio. The lock is
+# automatically released if this process exits or is killed.
+exec 9>"$COORDINATION_LOCK_FILE"
+if ! flock -n 9; then
     exit 0
 fi
 
@@ -124,7 +125,23 @@ is_hotspot_active() {
 }
 
 if is_hotspot_active; then
+    FAILURES="$(get_failures)"
+    if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
+        log "Fallback hotspot is active on ${HOTSPOT_IFACE}; recovery confirmed"
+    fi
     set_failures 0
+    exit 0
+fi
+
+if [[ "$DESIRED_MODE" == "hotspot" ]]; then
+    log "Persistent hotspot mode requested; enabling hotspot on ${HOTSPOT_IFACE}"
+    if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1; then
+        log "Persistent hotspot enabled successfully on ${HOTSPOT_IFACE}"
+        set_failures 0
+    else
+        log "Failed to enable persistent hotspot on ${HOTSPOT_IFACE}; will retry"
+        set_failures "$MAX_FAILURES"
+    fi
     exit 0
 fi
 
@@ -140,6 +157,10 @@ gateway_reachable() {
 }
 
 if gateway_reachable; then
+    FAILURES="$(get_failures)"
+    if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
+        log "Gateway connectivity restored on ${CLIENT_IFACE} after ${FAILURES} failed check(s)"
+    fi
     set_failures 0
     exit 0
 fi
@@ -157,6 +178,13 @@ if [[ "$FAILURES" -lt "$MAX_FAILURES" ]]; then
 fi
 
 log "Gateway unreachable on ${CLIENT_IFACE} after ${MAX_FAILURES} consecutive checks; enabling fallback hotspot on ${HOTSPOT_IFACE}"
-"$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1 || log "Failed to enable fallback hotspot"
-set_failures 0
+if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1; then
+    log "Fallback hotspot enabled successfully on ${HOTSPOT_IFACE}"
+    set_failures 0
+else
+    log "Failed to enable fallback hotspot on ${HOTSPOT_IFACE}; will retry"
+    # Keep the threshold reached so the next timer run retries immediately
+    # instead of waiting for another full failure-count cycle.
+    set_failures "$MAX_FAILURES"
+fi
 exit 0

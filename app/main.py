@@ -4,6 +4,7 @@ import csv
 import asyncio
 import uuid
 import re
+import socket
 import fnmatch
 import tempfile
 import shutil
@@ -23,7 +24,15 @@ from typing import Optional, List, Dict, Any
 from .auth import verify_token
 from .job_manager import job_manager, JobStatus
 from .local_logging import install_stdio_tee
-from .wifi_config import load_wifi_config, save_wifi_config
+from .wifi_config import (
+    NETWORK_MODE_AUTO,
+    NETWORK_MODE_HOTSPOT,
+    VALID_NETWORK_MODES,
+    load_wifi_config,
+    normalize_network_mode,
+    save_network_mode,
+    save_wifi_config,
+)
 from .hotspot_config import load_hotspot_config, save_hotspot_settings
 
 install_stdio_tee()
@@ -243,6 +252,25 @@ class WifiStatusResponse(BaseModel):
     channel: Optional[int] = None
     frequency: Optional[float] = None
     connections: List[WifiConnectionStatus] = Field(default_factory=list)
+    desiredMode: str = NETWORK_MODE_AUTO
+    observedMode: str = "disconnected"
+
+
+class WifiModeRequest(BaseModel):
+    desiredMode: str
+
+
+class WifiModeStatusResponse(BaseModel):
+    desiredMode: str
+    observedMode: str
+    availableModes: List[str] = Field(default_factory=lambda: sorted(VALID_NETWORK_MODES))
+
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    rigId: str
+    apiVersion: int
 
 
 class WifiAdapterInfo(BaseModel):
@@ -415,6 +443,46 @@ def _get_configured_wifi_interfaces() -> tuple[str, str]:
     client_interface = _sanitize_interface_name(config.get("client_interface")) or "wlan0"
     hotspot_interface = _sanitize_interface_name(config.get("hotspot_interface")) or client_interface
     return client_interface, hotspot_interface
+
+
+def _get_rig_id() -> str:
+    configured = os.getenv("PINS_RIG_ID", "").strip()
+    if configured:
+        candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", configured).strip("-").lower()
+        if candidate:
+            return candidate
+
+    suffix = ""
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8") as f:
+            match = re.search(r"^Serial\s*:\s*([0-9A-Fa-f]+)\s*$", f.read(), re.MULTILINE)
+        if match:
+            suffix = match.group(1)[-5:]
+    except OSError:
+        pass
+
+    if not suffix:
+        try:
+            with open("/etc/machine-id", "r", encoding="utf-8") as f:
+                machine_id = re.sub(r"[^0-9A-Fa-f]", "", f.read())
+            suffix = machine_id[-5:]
+        except OSError:
+            pass
+
+    if not suffix:
+        suffix = re.sub(r"[^A-Za-z0-9]", "", socket.gethostname())[-5:] or "00000"
+    return f"pins-{suffix.lower()}"
+
+
+def _observed_network_mode(active_connections: List[Dict[str, Optional[str]]]) -> str:
+    roles = {str(connection.get("role") or "") for connection in active_connections}
+    if "client" in roles and "hotspot" in roles:
+        return "dual"
+    if "hotspot" in roles:
+        return NETWORK_MODE_HOTSPOT
+    if "client" in roles:
+        return "client"
+    return "disconnected"
 
 
 def _normalize_hotspot_band(band: Optional[str]) -> Optional[str]:
@@ -876,6 +944,12 @@ class JobResponse(BaseModel):
     startedAt: float
     finishedAt: Optional[float]
     command: str
+
+
+class WifiModeOperationResponse(BaseModel):
+    desiredMode: str
+    job: JobResponse
+
 
 class FirmwareUploadResponse(BaseModel):
     status: str
@@ -1528,6 +1602,18 @@ async def schedule_startup_tasks() -> None:
     asyncio.create_task(_ensure_required_packages_on_startup())
     asyncio.create_task(_run_wifi_automanage_on_startup())
 
+
+@app.get("/health", response_model=HealthResponse)
+async def health():
+    """Minimal unauthenticated endpoint used to identify a local PINS rig."""
+    return HealthResponse(
+        status="ok",
+        service="pinsdaemon",
+        rigId=_get_rig_id(),
+        apiVersion=2,
+    )
+
+
 @app.post("/upgrade", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def trigger_upgrade(request: UpgradeRequest):
     """
@@ -2094,6 +2180,49 @@ async def list_wifi_adapters():
     return WifiAdaptersResponse(adapters=adapters)
 
 
+async def _start_network_mode_job(desired_mode: str):
+    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    if desired_mode == NETWORK_MODE_HOTSPOT:
+        cmd = [
+            "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
+            "--hotspot",
+            "--client-iface", client_interface,
+            "--hotspot-iface", hotspot_interface,
+        ]
+    else:
+        cmd = ["sudo", "-n", WIFI_AUTOMANAGE_SCRIPT_PATH]
+
+    job_id = await job_manager.start_job(cmd)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Network mode job was not created")
+    return job
+
+
+@app.get("/wifi/mode", response_model=WifiModeStatusResponse, dependencies=[Depends(verify_token)])
+async def get_wifi_mode():
+    active_connections = await _read_active_wifi_connections()
+    return WifiModeStatusResponse(
+        desiredMode=normalize_network_mode(load_wifi_config().get("desired_mode")),
+        observedMode=_observed_network_mode(active_connections),
+    )
+
+
+@app.put("/wifi/mode", response_model=WifiModeOperationResponse, dependencies=[Depends(verify_token)])
+async def set_wifi_mode(request: WifiModeRequest):
+    desired_mode = request.desiredMode.strip().lower()
+    if desired_mode not in VALID_NETWORK_MODES:
+        supported = ", ".join(sorted(VALID_NETWORK_MODES))
+        raise HTTPException(status_code=400, detail=f"desiredMode must be one of: {supported}")
+
+    save_network_mode(desired_mode)
+    job = await _start_network_mode_job(desired_mode)
+    return WifiModeOperationResponse(
+        desiredMode=desired_mode,
+        job=_job_response_from_runtime_job(job),
+    )
+
+
 @app.get("/wifi/interfaces", response_model=WifiInterfacesResponse, dependencies=[Depends(verify_token)])
 async def get_wifi_interfaces():
     client_interface, hotspot_interface = _get_configured_wifi_interfaces()
@@ -2233,7 +2362,12 @@ async def connect_wifi(request: WifiConnectRequest):
             request.band,
             client_interface=client_interface,
             hotspot_interface=hotspot_interface,
+            desired_mode=NETWORK_MODE_AUTO,
         )
+    else:
+        # A deliberate client connection leaves persistent field mode and returns
+        # the reconciler to automatic client-with-hotspot-fallback behavior.
+        save_network_mode(NETWORK_MODE_AUTO)
     
     # Check if script exists (only nice to have check, the job will fail if not found)
     # But locally on windows it's different path.
@@ -2258,27 +2392,9 @@ async def disable_wifi_and_enable_hotspot():
     """
     Disables Wi-Fi client usage by forcing hotspot mode.
     """
-    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
-    cmd = [
-        "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
-        "--hotspot",
-        "--client-iface", client_interface,
-        "--hotspot-iface", hotspot_interface,
-    ]
-
-    job_id = await job_manager.start_job(cmd)
-    job = job_manager.get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not created")
-
-    return JobResponse(
-        jobId=job.id,
-        status=job.status,
-        exitCode=job.exit_code,
-        startedAt=job.created_at,
-        finishedAt=job.finished_at,
-        command=job.command,
-    )
+    save_network_mode(NETWORK_MODE_HOTSPOT)
+    job = await _start_network_mode_job(NETWORK_MODE_HOTSPOT)
+    return _job_response_from_runtime_job(job)
 
 
 @app.get("/wifi/auto-connect", dependencies=[Depends(verify_token)])
@@ -2382,6 +2498,8 @@ async def get_wifi_status():
     """
     try:
         active_connections = await _read_active_wifi_connections()
+        desired_mode = normalize_network_mode(load_wifi_config().get("desired_mode"))
+        observed_mode = _observed_network_mode(active_connections)
         if not active_connections:
             return WifiStatusResponse(
                 connected=False,
@@ -2395,6 +2513,8 @@ async def get_wifi_status():
                 channel=None,
                 frequency=None,
                 connections=[],
+                desiredMode=desired_mode,
+                observedMode=observed_mode,
             )
 
         connection_statuses: list[WifiConnectionStatus] = []
@@ -2438,6 +2558,8 @@ async def get_wifi_status():
             channel=primary_client.channel if primary_client else None,
             frequency=primary_client.frequency if primary_client else None,
             connections=connection_statuses,
+            desiredMode=desired_mode,
+            observedMode=observed_mode,
         )
         
     except Exception as e:
@@ -2454,6 +2576,8 @@ async def get_wifi_status():
             channel=None,
             frequency=None,
             connections=[],
+            desiredMode=normalize_network_mode(load_wifi_config().get("desired_mode")),
+            observedMode="unknown",
         )
 
 

@@ -158,6 +158,28 @@ if [ -f "/etc/systemd/system/pins-wifi-watchdog.timer" ]; then
     chmod 644 /etc/systemd/system/pins-wifi-watchdog.timer
 fi
 
+# Preserve system and recovery logs across reboot. The package owns only the
+# drop-in; existing administrator settings in journald.conf remain untouched.
+if [ -f "/etc/systemd/journald.conf.d/90-pins-persistent.conf" ]; then
+    chown root:root /etc/systemd/journald.conf.d/90-pins-persistent.conf
+    chmod 644 /etc/systemd/journald.conf.d/90-pins-persistent.conf
+    mkdir -p /var/log/journal
+    if getent group systemd-journal >/dev/null 2>&1; then
+        chown root:systemd-journal /var/log/journal
+    else
+        chown root:root /var/log/journal
+    fi
+    chmod 2755 /var/log/journal
+    systemctl restart systemd-journald || true
+    journalctl --flush || true
+fi
+
+if [ -f "/etc/avahi/services/pinsdaemon.service" ]; then
+    chown root:root /etc/avahi/services/pinsdaemon.service
+    chmod 644 /etc/avahi/services/pinsdaemon.service
+    systemctl enable --now avahi-daemon || true
+fi
+
 # Ensure ASI udev rules file has correct ownership and mode
 if [ -f "/lib/udev/rules.d/99-asi.rules" ]; then
     chown root:root /lib/udev/rules.d/99-asi.rules
