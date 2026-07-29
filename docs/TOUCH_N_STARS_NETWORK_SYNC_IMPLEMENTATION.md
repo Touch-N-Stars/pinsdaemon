@@ -70,6 +70,9 @@ the existing bearer token.
 ```
 
 Debian installations advertise `_pinsdaemon._tcp` over mDNS on port 8000.
+Avahi owns the rig's stable hostname. The Linux N.I.N.A. plugin continues to
+advertise `_touchnstars._tcp` with its active HTTP port, but marks that mDNS
+profile as shared so it does not compete with Avahi for the hostname.
 
 ### Desired and observed network mode
 

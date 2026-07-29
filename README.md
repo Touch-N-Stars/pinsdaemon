@@ -76,7 +76,10 @@ The daemon provides a facade over system shell scripts. Long-running tasks (like
 `GET /health` is an unauthenticated, read-only discovery endpoint. It returns a
 stable `rigId`, service name, and API version without exposing configuration or
 credentials. Debian installations also advertise `_pinsdaemon._tcp` through
-Avahi/mDNS on port 8000.
+Avahi/mDNS on port 8000. Avahi remains the owner of the stable PINS hostname.
+The Linux Touch-N-Stars plugin advertises its separate `_touchnstars._tcp`
+service and active HTTP port as a shared mDNS profile, so both discovery
+records resolve to the same hostname without creating `-2`/`-3` aliases.
 
 ## API Endpoints
 
