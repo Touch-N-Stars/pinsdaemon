@@ -1,11 +1,12 @@
 <?xml version="1.0" standalone="no"?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
-  <name replace-wildcards="yes">PINS daemon on %h</name>
+  <name replace-wildcards="yes">%h</name>
   <service>
     <type>_pinsdaemon._tcp</type>
     <port>8000</port>
     <txt-record>path=/health</txt-record>
     <txt-record>api-version=2</txt-record>
+    <txt-record>backendPort=5000</txt-record>
   </service>
 </service-group>

@@ -6,6 +6,7 @@ DEFAULT_HOTSPOT_PASSWORD="touchnstars"
 COORDINATION_LOCK_FILE="/run/pins-wifi-coordination.lock"
 COORDINATION_LOCK_WAIT_SECONDS="${PINS_WIFI_COORDINATION_LOCK_WAIT_SECONDS:-30}"
 DEFAULT_WIFI_INTERFACE="wlan0"
+RIG_NAME_COMMAND="${PINS_RIG_NAME_COMMAND:-/usr/local/bin/pins-rig-name}"
 NM_DNSMASQ_SHARED_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 PINS_LOCAL_ONLY_DHCP_CONF="$NM_DNSMASQ_SHARED_DIR/pins-local-only.conf"
 HOTSPOT_IPV4_CIDR="${PINS_HOTSPOT_IPV4_CIDR:-10.42.0.1/24}"
@@ -313,19 +314,16 @@ enable_hotspot() {
         done <<< "$existing_hotspots"
     fi
     
-    # Get CPU ID for unique SSID
-    CPU_ID="0000"
-    if [ -f /proc/cpuinfo ]; then
-        # Use user provided logic to extract serial
-        CPU_ID=$(grep Serial /proc/cpuinfo | awk '{print substr($3, length($3)-4)}')
+    # The hotspot SSID and mDNS hostname share one persisted hardware identity.
+    # This makes each rig unambiguous on networks containing multiple PINS units.
+    if [ -x "$RIG_NAME_COMMAND" ]; then
+        HOTSPOT_SSID="$("$RIG_NAME_COMMAND")"
+    else
+        CPU_ID="$(sed -n 's/^Serial[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo 2>/dev/null \
+            | tr -cd '0-9A-Fa-f' | sed 's/.*\(.....\)$/\1/')"
+        [ -n "$CPU_ID" ] || CPU_ID="00000"
+        HOTSPOT_SSID="pins-$(printf '%s' "$CPU_ID" | tr '[:upper:]' '[:lower:]')"
     fi
-    
-    # Fallback if empty
-    if [ -z "$CPU_ID" ]; then
-        CPU_ID="0000"
-    fi
-
-    HOTSPOT_SSID="pins-$CPU_ID"
     HOTSPOT_PASSWORD="$(get_hotspot_password)"
     HOTSPOT_BAND="$(get_hotspot_band)"
     HOTSPOT_CHANNEL="$(get_hotspot_channel)"
@@ -455,33 +453,37 @@ fi
 
 echo "Preparing to connect to $SSID..."
 
-# 0. Force a rescan to ensure we know the security type
-# We run this in the background/wait briefly or just run it. 
-# Sometimes rescan fails if busy, we ignore error.
-nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
-# Give it a moment to populate
-sleep 3
-
-# 1. Remove existing hotspot connection only in single-adapter mode.
-# In dual-adapter mode we intentionally keep hotspot on the dedicated interface.
+# 0. A single radio cannot scan/connect while it is still serving the AP.
+# Deactivate and remove the hotspot profile before asking NetworkManager to
+# return that radio to managed/client mode.
 if [ "$PARALLEL_WIFI_MODE" = false ]; then
-    echo "Cleaning up existing hotspot connections..."
+    echo "Stopping single-adapter hotspot before client scan..."
     existing_hotspots=$(nmcli -t -f NAME connection show | grep -E "^(Hotspot|hotspot-ap)")
 
     if [ -n "$existing_hotspots" ]; then
-        # Process each line to handle potential spaces in names
         while IFS= read -r conn; do
             if [ -n "$conn" ]; then
+                nmcli connection down "$conn" >/dev/null 2>&1 || true
                 echo "Removing hotspot connection: $conn"
                 nmcli connection delete "$conn" || true
             fi
         done <<< "$existing_hotspots"
     fi
-else
+    nmcli device disconnect "$CLIENT_IFACE" >/dev/null 2>&1 || true
+fi
+
+# 1. Force a rescan to ensure we know the security type
+# We run this in the background/wait briefly or just run it.
+# Sometimes rescan fails if busy, we ignore error.
+nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
+# Give it a moment to populate
+sleep 3
+
+if [ "$PARALLEL_WIFI_MODE" = true ]; then
     echo "Parallel Wi-Fi mode active. Keeping hotspot profile on $HOTSPOT_IFACE."
 fi
 
-# 2. Clean up any EXISTING profiles for the target SSID
+# 2. Prepare any EXISTING profile for the target SSID
 # We only delete the profile if we actually intend to update it with a new password
 # BUT, deleting it makes "device connect" rely purely on scan results, which can be flaky.
 # Instead, we should try to modify the existing connection if it exists, or verify the network is visible.

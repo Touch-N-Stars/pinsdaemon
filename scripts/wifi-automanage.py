@@ -40,6 +40,45 @@ def get_configured_interfaces(config):
     return client_iface, hotspot_iface
 
 
+def list_wifi_interfaces():
+    try:
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,TYPE", "device", "status"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        print(f"Could not enumerate Wi-Fi adapters: {exc}")
+        return []
+
+    interfaces = []
+    for line in result.stdout.splitlines():
+        device, separator, device_type = line.partition(":")
+        if separator and device and device_type == "wifi":
+            interfaces.append(device)
+    return interfaces
+
+
+def resolve_wifi_interfaces(config):
+    configured_client, configured_hotspot = get_configured_interfaces(config)
+    available = list_wifi_interfaces()
+    if not available:
+        # Keep the historic fallback so wifi-connect.sh can provide its own
+        # diagnostic if NetworkManager temporarily cannot enumerate adapters.
+        return configured_client, configured_hotspot
+
+    default_interface = DEFAULT_WIFI_INTERFACE if DEFAULT_WIFI_INTERFACE in available else available[0]
+    client_iface = configured_client if configured_client in available else default_interface
+    hotspot_iface = configured_hotspot if configured_hotspot in available else client_iface
+    if (client_iface, hotspot_iface) != (configured_client, configured_hotspot):
+        print(
+            "Configured Wi-Fi adapter is unavailable; using "
+            f"client={client_iface}, hotspot={hotspot_iface}."
+        )
+    return client_iface, hotspot_iface
+
+
 def wifi_connect_cmd(*args):
     if os.geteuid() == 0:
         return [WIFI_CONNECT_SCRIPT, *args]
@@ -109,7 +148,7 @@ def start_hotspot(client_interface=DEFAULT_WIFI_INTERFACE, hotspot_interface=DEF
 
 def main():
     config = load_config()
-    client_interface, hotspot_interface = get_configured_interfaces(config)
+    client_interface, hotspot_interface = resolve_wifi_interfaces(config)
     
     if not config:
         print("No wifi configuration found.")

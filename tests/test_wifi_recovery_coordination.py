@@ -71,6 +71,16 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         )
         self.assertIn('DESIRED_MODE="${IFACES[2]:-auto}"', source)
         self.assertIn('if [[ "$DESIRED_MODE" == "hotspot" ]]', source)
+        self.assertRegex(source, re.compile(r"\bup\|down\|dhcp4-change"))
+        self.assertIn("persist_auto_mode", source)
+        self.assertIn("returning network mode to auto", source)
+
+    def test_manual_single_radio_client_is_not_replaced_by_persistent_hotspot(self):
+        watchdog = self.read(WATCHDOG)
+        self.assertIn("is_wifi_client_active", watchdog)
+        client_guard = watchdog.index('&& is_wifi_client_active; then')
+        forced_hotspot = watchdog.index('if [[ "$DESIRED_MODE" == "hotspot" ]]', client_guard)
+        self.assertLess(client_guard, forced_hotspot)
 
     def test_hotspot_has_fixed_address_and_activation_postcondition(self):
         source = self.read(WIFI_CONNECT)
@@ -78,6 +88,13 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         self.assertIn("hotspot_postcondition_met", source)
         self.assertIn('ipv4.method shared ipv4.addresses "$HOTSPOT_IPV4_CIDR"', source)
         self.assertIn("Hotspot activation did not reach the required AP/IP postcondition", source)
+
+    def test_single_adapter_hotspot_is_stopped_before_client_scan(self):
+        source = self.read(WIFI_CONNECT)
+        stop_position = source.index("Stopping single-adapter hotspot before client scan")
+        scan_position = source.index('nmcli device wifi rescan ifname "$CLIENT_IFACE"', stop_position)
+        self.assertLess(stop_position, scan_position)
+        self.assertIn('nmcli connection down "$conn"', source[stop_position:scan_position])
 
     def test_package_installs_persistent_journal_configuration(self):
         workflow = self.read(REPO_ROOT / ".github" / "workflows" / "build-deb.yml")
@@ -103,6 +120,21 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         )
         self.assertIn("<type>_pinsdaemon._tcp</type>", avahi_service)
         self.assertIn("<port>8000</port>", avahi_service)
+        self.assertIn("<name replace-wildcards=\"yes\">%h</name>", avahi_service)
+        self.assertIn("<txt-record>backendPort=5000</txt-record>", avahi_service)
+
+    def test_hotspot_and_mdns_share_the_persisted_rig_name(self):
+        workflow = self.read(REPO_ROOT / ".github" / "workflows" / "build-deb.yml")
+        postinst = self.read(REPO_ROOT / "packaging" / "DEBIAN" / "postinst")
+        wifi_connect = self.read(WIFI_CONNECT)
+        rig_name = self.read(REPO_ROOT / "scripts" / "pins-rig-name")
+
+        self.assertIn("cp scripts/pins-rig-name build/usr/local/bin/", workflow)
+        self.assertIn("bash -n scripts/*.sh scripts/pins-rig-name", workflow)
+        self.assertIn('HOTSPOT_SSID="$("$RIG_NAME_COMMAND")"', wifi_connect)
+        self.assertIn("/usr/local/bin/pins-rig-name --ensure", postinst)
+        self.assertIn('hostnamectl set-hostname "$PINS_RIG_NAME"', postinst)
+        self.assertIn("/etc/pins/rig-name", rig_name)
 
     def test_legacy_private_directory_locks_are_removed(self):
         watchdog = self.read(WATCHDOG)

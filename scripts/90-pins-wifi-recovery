@@ -6,7 +6,7 @@ ACTION="${2:-}"
 
 # Run only for relevant lifecycle changes where recovery decisions make sense.
 case "$ACTION" in
-    down|dhcp4-change|connectivity-change|reapply)
+    up|down|dhcp4-change|connectivity-change|reapply)
         ;;
     *)
         exit 0
@@ -174,6 +174,35 @@ set_failures() {
     printf "%s\n" "$1" > "$STATE_FILE"
 }
 
+persist_auto_mode() {
+    python3 - "$WIFI_CONFIG_FILE" <<'PY'
+import json
+import os
+import tempfile
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as source:
+    config = json.load(source)
+config["desired_mode"] = "auto"
+directory = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix=".wifi-config-", suffix=".tmp", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as target:
+        json.dump(config, target, indent=2)
+        target.write("\n")
+        target.flush()
+        os.fsync(target.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
 if is_hotspot_active; then
     FAILURES="$(get_failures)"
     if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
@@ -181,6 +210,20 @@ if is_hotspot_active; then
     fi
     set_failures 0
     exit 0
+fi
+
+# Activating a normal client profile from the desktop/VNC is an explicit user
+# request to leave forced field-hotspot mode. Without this hand-off, the next
+# watchdog tick would recreate the AP and disconnect the client on a single
+# radio.
+if [[ "$ACTION" == "up" && "$DESIRED_MODE" == "hotspot" && "$CLIENT_IFACE" == "$HOTSPOT_IFACE" ]] \
+    && is_wifi_client_connected; then
+    if persist_auto_mode; then
+        DESIRED_MODE="auto"
+        log "Wi-Fi client activated manually on ${CLIENT_IFACE}; returning network mode to auto"
+    else
+        log "Failed to persist automatic mode after manual Wi-Fi client activation"
+    fi
 fi
 
 if [[ "$DESIRED_MODE" == "hotspot" ]]; then
