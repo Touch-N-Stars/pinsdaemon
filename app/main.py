@@ -445,6 +445,45 @@ def _get_configured_wifi_interfaces() -> tuple[str, str]:
     return client_interface, hotspot_interface
 
 
+async def _resolve_wifi_interfaces(
+    requested_client: Optional[str] = None,
+    requested_hotspot: Optional[str] = None,
+) -> tuple[str, str]:
+    """Resolve configured roles against the adapters that currently exist.
+
+    A USB Wi-Fi adapter is optional and may disappear after its interface name
+    has been persisted. Explicit interface choices are still validated, while
+    stale persisted choices gracefully collapse onto an available adapter.
+    """
+    adapters = await _list_wifi_adapters()
+    available = [adapter.interface for adapter in adapters]
+    available_set = set(available)
+    if not available:
+        raise HTTPException(status_code=503, detail="No Wi-Fi adapter is available")
+
+    explicit = {
+        interface
+        for interface in (requested_client, requested_hotspot)
+        if interface is not None
+    }
+    missing_explicit = sorted(interface for interface in explicit if interface not in available_set)
+    if missing_explicit:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown Wi-Fi interface(s): {', '.join(missing_explicit)}",
+        )
+
+    configured_client, configured_hotspot = _get_configured_wifi_interfaces()
+    default_interface = "wlan0" if "wlan0" in available_set else available[0]
+    client_interface = requested_client or (
+        configured_client if configured_client in available_set else default_interface
+    )
+    hotspot_interface = requested_hotspot or (
+        configured_hotspot if configured_hotspot in available_set else client_interface
+    )
+    return client_interface, hotspot_interface
+
+
 def _get_rig_id() -> str:
     configured = os.getenv("PINS_RIG_ID", "").strip()
     if configured:
@@ -2191,7 +2230,7 @@ async def list_wifi_adapters():
 
 
 async def _start_network_mode_job(desired_mode: str):
-    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    client_interface, hotspot_interface = await _resolve_wifi_interfaces()
     if desired_mode == NETWORK_MODE_HOTSPOT:
         cmd = [
             "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
@@ -2235,7 +2274,7 @@ async def set_wifi_mode(request: WifiModeRequest):
 
 @app.get("/wifi/interfaces", response_model=WifiInterfacesResponse, dependencies=[Depends(verify_token)])
 async def get_wifi_interfaces():
-    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    client_interface, hotspot_interface = await _resolve_wifi_interfaces()
     return WifiInterfacesResponse(client_interface=client_interface, hotspot_interface=hotspot_interface)
 
 
@@ -2245,23 +2284,11 @@ async def set_wifi_interfaces(request: WifiInterfacesRequest):
     hotspot_interface_input = _validate_interface_name(request.hotspot_interface, "hotspot_interface")
 
     current = load_wifi_config()
-    current_client = _sanitize_interface_name(current.get("client_interface")) or "wlan0"
-    current_hotspot = _sanitize_interface_name(current.get("hotspot_interface")) or current_client
-
-    client_interface = client_interface_input if client_interface_input is not None else current_client
-    hotspot_interface = hotspot_interface_input if hotspot_interface_input is not None else current_hotspot
-
-    requested_interfaces = set()
-    if client_interface_input is not None:
-        requested_interfaces.add(client_interface)
-    if hotspot_interface_input is not None:
-        requested_interfaces.add(hotspot_interface)
-
-    if requested_interfaces:
-        available = {adapter.interface for adapter in await _list_wifi_adapters()}
-        missing = sorted(interface for interface in requested_interfaces if interface not in available)
-        if missing:
-            raise HTTPException(status_code=400, detail=f"Unknown Wi-Fi interface(s): {', '.join(missing)}")
+    current_client, current_hotspot = _get_configured_wifi_interfaces()
+    client_interface, hotspot_interface = await _resolve_wifi_interfaces(
+        client_interface_input,
+        hotspot_interface_input,
+    )
 
     save_wifi_config(
         current.get("ssid"),
@@ -2324,17 +2351,10 @@ async def connect_wifi(request: WifiConnectRequest):
     request_client_interface = _validate_interface_name(request.client_interface, "client_interface")
     request_hotspot_interface = _validate_interface_name(request.hotspot_interface, "hotspot_interface")
 
-    configured_client, configured_hotspot = _get_configured_wifi_interfaces()
-    client_interface = request_client_interface or configured_client
-    hotspot_interface = request_hotspot_interface or configured_hotspot
-
-    if request_client_interface or request_hotspot_interface:
-        available = {adapter.interface for adapter in await _list_wifi_adapters()}
-        missing = sorted(
-            iface for iface in {client_interface, hotspot_interface} if iface not in available
-        )
-        if missing:
-            raise HTTPException(status_code=400, detail=f"Unknown Wi-Fi interface(s): {', '.join(missing)}")
+    client_interface, hotspot_interface = await _resolve_wifi_interfaces(
+        request_client_interface,
+        request_hotspot_interface,
+    )
 
     cmd = [
         "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
@@ -2364,7 +2384,8 @@ async def connect_wifi(request: WifiConnectRequest):
 
     # Note: connect script now handles 3rd argument as BAND
     
-    # If auto_connect is requested, save the config immediately
+    # Always persist the reconciled adapter roles. Credentials/SSID remain
+    # persistent only when auto-connect was explicitly requested.
     if request.auto_connect:
         save_wifi_config(
             request.ssid,
@@ -2377,7 +2398,15 @@ async def connect_wifi(request: WifiConnectRequest):
     else:
         # A deliberate client connection leaves persistent field mode and returns
         # the reconciler to automatic client-with-hotspot-fallback behavior.
-        save_network_mode(NETWORK_MODE_AUTO)
+        current = load_wifi_config()
+        save_wifi_config(
+            current.get("ssid"),
+            bool(current.get("auto_connect", False)),
+            current.get("band"),
+            client_interface=client_interface,
+            hotspot_interface=hotspot_interface,
+            desired_mode=NETWORK_MODE_AUTO,
+        )
     
     # Check if script exists (only nice to have check, the job will fail if not found)
     # But locally on windows it's different path.
@@ -2415,7 +2444,7 @@ async def get_wifi_auto_connect():
 @app.get("/wifi/hotspot/password", response_model=HotspotPasswordStatusResponse, dependencies=[Depends(verify_token)])
 async def get_hotspot_password():
     config = load_hotspot_config()
-    _, hotspot_interface = _get_configured_wifi_interfaces()
+    _, hotspot_interface = await _resolve_wifi_interfaces()
     supported_channels = await _read_hotspot_supported_channels(hotspot_interface)
     return HotspotPasswordStatusResponse(
         configured=(config["source"] == "configured"),
@@ -2435,7 +2464,7 @@ async def set_hotspot_password(request: HotspotPasswordRequest):
 
     normalized_band, normalized_channel = _validate_hotspot_band_channel(request.band, request.channel)
 
-    client_interface, hotspot_interface = _get_configured_wifi_interfaces()
+    client_interface, hotspot_interface = await _resolve_wifi_interfaces()
     supported_channels = await _read_hotspot_supported_channels(hotspot_interface)
     if normalized_channel is not None and normalized_band is not None:
         band_channels = supported_channels.get(normalized_band, [])

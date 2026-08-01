@@ -124,11 +124,26 @@ is_hotspot_active() {
         | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
 }
 
+is_wifi_client_active() {
+    nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
+        | awk -F: -v iface="$CLIENT_IFACE" \
+            '$2=="802-11-wireless" && $3==iface && $1!="Hotspot" && $1!="hotspot-ap" && $1!~ /^pins-/ {found=1} END {exit !found}'
+}
+
 if is_hotspot_active; then
     FAILURES="$(get_failures)"
     if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
         log "Fallback hotspot is active on ${HOTSPOT_IFACE}; recovery confirmed"
     fi
+    set_failures 0
+    exit 0
+fi
+
+# NetworkManager's dispatcher normally persists this manual override. This
+# independent guard ensures a desktop/VNC client activation is not torn down
+# even if that dispatcher event is delayed or unavailable.
+if [[ "$DESIRED_MODE" == "hotspot" && "$CLIENT_IFACE" == "$HOTSPOT_IFACE" ]] \
+    && is_wifi_client_active; then
     set_failures 0
     exit 0
 fi

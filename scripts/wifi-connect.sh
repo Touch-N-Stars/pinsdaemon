@@ -453,33 +453,37 @@ fi
 
 echo "Preparing to connect to $SSID..."
 
-# 0. Force a rescan to ensure we know the security type
-# We run this in the background/wait briefly or just run it. 
-# Sometimes rescan fails if busy, we ignore error.
-nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
-# Give it a moment to populate
-sleep 3
-
-# 1. Remove existing hotspot connection only in single-adapter mode.
-# In dual-adapter mode we intentionally keep hotspot on the dedicated interface.
+# 0. A single radio cannot scan/connect while it is still serving the AP.
+# Deactivate and remove the hotspot profile before asking NetworkManager to
+# return that radio to managed/client mode.
 if [ "$PARALLEL_WIFI_MODE" = false ]; then
-    echo "Cleaning up existing hotspot connections..."
+    echo "Stopping single-adapter hotspot before client scan..."
     existing_hotspots=$(nmcli -t -f NAME connection show | grep -E "^(Hotspot|hotspot-ap)")
 
     if [ -n "$existing_hotspots" ]; then
-        # Process each line to handle potential spaces in names
         while IFS= read -r conn; do
             if [ -n "$conn" ]; then
+                nmcli connection down "$conn" >/dev/null 2>&1 || true
                 echo "Removing hotspot connection: $conn"
                 nmcli connection delete "$conn" || true
             fi
         done <<< "$existing_hotspots"
     fi
-else
+    nmcli device disconnect "$CLIENT_IFACE" >/dev/null 2>&1 || true
+fi
+
+# 1. Force a rescan to ensure we know the security type
+# We run this in the background/wait briefly or just run it.
+# Sometimes rescan fails if busy, we ignore error.
+nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
+# Give it a moment to populate
+sleep 3
+
+if [ "$PARALLEL_WIFI_MODE" = true ]; then
     echo "Parallel Wi-Fi mode active. Keeping hotspot profile on $HOTSPOT_IFACE."
 fi
 
-# 2. Clean up any EXISTING profiles for the target SSID
+# 2. Prepare any EXISTING profile for the target SSID
 # We only delete the profile if we actually intend to update it with a new password
 # BUT, deleting it makes "device connect" rely purely on scan results, which can be flaky.
 # Instead, we should try to modify the existing connection if it exists, or verify the network is visible.

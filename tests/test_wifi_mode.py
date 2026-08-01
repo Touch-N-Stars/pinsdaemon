@@ -128,5 +128,78 @@ class WifiModeApiTests(unittest.IsolatedAsyncioTestCase):
         start_job.assert_not_awaited()
 
 
+class WifiInterfaceFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.config_path = Path(self.temp_dir.name) / "wifi_config.json"
+        self.config_patch = patch.object(wifi_config, "CONFIG_FILE", str(self.config_path))
+        self.config_patch.start()
+
+    def tearDown(self):
+        self.config_patch.stop()
+        self.temp_dir.cleanup()
+
+    async def test_removed_usb_adapter_collapses_both_roles_to_internal_wifi(self):
+        wifi_config.save_wifi_config(
+            None,
+            False,
+            client_interface="wlan0",
+            hotspot_interface="wlan1",
+        )
+        adapters = [SimpleNamespace(interface="wlan0")]
+
+        with patch.object(main, "_list_wifi_adapters", new=AsyncMock(return_value=adapters)):
+            interfaces = await main._resolve_wifi_interfaces()
+
+        self.assertEqual(interfaces, ("wlan0", "wlan0"))
+
+    async def test_connect_heals_stale_optional_hotspot_interface_without_http_400(self):
+        wifi_config.save_wifi_config(
+            None,
+            False,
+            client_interface="wlan0",
+            hotspot_interface="wlan1",
+            desired_mode=wifi_config.NETWORK_MODE_HOTSPOT,
+        )
+        adapters = [SimpleNamespace(interface="wlan0")]
+        fake_job = SimpleNamespace(
+            id="job-1",
+            status=main.JobStatus.STARTED,
+            exit_code=None,
+            created_at=1.0,
+            finished_at=None,
+            command="wifi-connect",
+        )
+
+        with patch.object(main, "_list_wifi_adapters", new=AsyncMock(return_value=adapters)):
+            with patch.object(main.job_manager, "start_job", new=AsyncMock(return_value="job-1")) as start_job:
+                with patch.object(main.job_manager, "get_job", return_value=fake_job):
+                    result = await main.connect_wifi(
+                        main.WifiConnectRequest(
+                            ssid="Home",
+                            password="secret",
+                            client_interface="wlan0",
+                            hotspot_interface=None,
+                        )
+                    )
+
+        command = start_job.await_args.args[0]
+        self.assertIn("--client-iface", command)
+        self.assertEqual(command[command.index("--client-iface") + 1], "wlan0")
+        self.assertEqual(command[command.index("--hotspot-iface") + 1], "wlan0")
+        self.assertEqual(result.jobId, "job-1")
+        config = wifi_config.load_wifi_config()
+        self.assertEqual(config["hotspot_interface"], "wlan0")
+        self.assertEqual(config["desired_mode"], wifi_config.NETWORK_MODE_AUTO)
+
+    async def test_explicit_unknown_adapter_is_still_rejected(self):
+        adapters = [SimpleNamespace(interface="wlan0")]
+        with patch.object(main, "_list_wifi_adapters", new=AsyncMock(return_value=adapters)):
+            with self.assertRaises(main.HTTPException) as raised:
+                await main._resolve_wifi_interfaces(requested_hotspot="wlan9")
+
+        self.assertEqual(raised.exception.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main()
