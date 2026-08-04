@@ -11,6 +11,8 @@ NM_DNSMASQ_SHARED_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 PINS_LOCAL_ONLY_DHCP_CONF="$NM_DNSMASQ_SHARED_DIR/pins-local-only.conf"
 HOTSPOT_IPV4_CIDR="${PINS_HOTSPOT_IPV4_CIDR:-10.42.0.1/24}"
 HOTSPOT_IPV4_ADDRESS="${HOTSPOT_IPV4_CIDR%%/*}"
+HOTSPOT_AUTOCONNECT_PRIORITY="${PINS_HOTSPOT_AUTOCONNECT_PRIORITY:-0}"
+CLIENT_AUTOCONNECT_PRIORITY="${PINS_CLIENT_AUTOCONNECT_PRIORITY:-100}"
 FORCE_HOTSPOT=false
 CLIENT_IFACE=""
 HOTSPOT_IFACE=""
@@ -364,11 +366,10 @@ enable_hotspot() {
             if nmcli connection show "$conn" >/dev/null 2>&1; then
                 echo "Configuring hotspot profile: $conn"
                 nmcli connection modify "$conn" connection.autoconnect yes || true
-                # Fallback hotspot must win NetworkManager autoconnect arbitration once
-                # recovery has given up on client Wi-Fi. A low priority lets saved
-                # client profiles pull the single Wi-Fi adapter away again, causing
-                # client/hotspot bounce loops on flaky phone hotspots.
-                nmcli connection modify "$conn" connection.autoconnect-priority 100 || true
+                # At boot, a saved client network must win over the fallback AP.
+                # Recovery activates this profile explicitly, so it does not need
+                # a higher autoconnect priority than the client profile.
+                nmcli connection modify "$conn" connection.autoconnect-priority "$HOTSPOT_AUTOCONNECT_PRIORITY" || true
                 if ! nmcli connection modify "$conn" 802-11-wireless.mode ap; then
                     echo "Failed to configure AP mode on hotspot profile."
                     return 1
@@ -500,6 +501,8 @@ fi
 
 if nmcli connection show "$SSID" >/dev/null 2>&1; then
     nmcli connection modify "$SSID" connection.interface-name "$CLIENT_IFACE" || true
+    nmcli connection modify "$SSID" connection.autoconnect yes || true
+    nmcli connection modify "$SSID" connection.autoconnect-priority "$CLIENT_AUTOCONNECT_PRIORITY" || true
 fi
 
 # 3. Connect to the new wifi network
@@ -592,6 +595,8 @@ fi
 # Filter specifically for wireless connections to avoid configuring ethernet connections
 CURRENT_CONN=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | grep ":802-11-wireless:$CLIENT_IFACE" | cut -d: -f1 | head -n1)
 if [ -n "$CURRENT_CONN" ]; then
+    nmcli connection modify "$CURRENT_CONN" connection.autoconnect yes || true
+    nmcli connection modify "$CURRENT_CONN" connection.autoconnect-priority "$CLIENT_AUTOCONNECT_PRIORITY" || true
     nmcli connection modify "$CURRENT_CONN" 802-11-wireless.powersave 2 || true
 fi
 exit 0

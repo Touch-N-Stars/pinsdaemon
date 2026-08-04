@@ -136,6 +136,25 @@ if [ -f "/etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery" ]; then
     chmod 755 /etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery
 fi
 
+# Migrate existing NetworkManager profiles to the PINS boot policy. Saved
+# client networks must be preferred over the fallback AP. Recovery activates
+# the AP explicitly after client retries fail, so a low AP autoconnect priority
+# does not weaken field fallback behavior.
+if command -v nmcli >/dev/null 2>&1; then
+    nmcli -t -f UUID,TYPE connection show 2>/dev/null \
+        | while IFS=: read -r profile_uuid profile_type; do
+            [ "$profile_type" = "802-11-wireless" ] || continue
+            [ -n "$profile_uuid" ] || continue
+
+            profile_mode=$(nmcli -g 802-11-wireless.mode connection show "$profile_uuid" 2>/dev/null || true)
+            if [ "$profile_mode" = "ap" ]; then
+                nmcli connection modify "$profile_uuid" connection.autoconnect-priority 0 || true
+            else
+                nmcli connection modify "$profile_uuid" connection.autoconnect-priority 100 || true
+            fi
+        done
+fi
+
 # Keep the PINS fallback hotspot local-only. NetworkManager shared mode still
 # serves DHCP, but dnsmasq suppresses router/DNS options so phones keep LTE/5G
 # as their Internet route while connected to the device AP.

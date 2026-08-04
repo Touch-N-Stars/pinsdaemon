@@ -89,6 +89,24 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         self.assertIn('ipv4.method shared ipv4.addresses "$HOTSPOT_IPV4_CIDR"', source)
         self.assertIn("Hotspot activation did not reach the required AP/IP postcondition", source)
 
+    def test_client_wifi_wins_autoconnect_priority_over_fallback_hotspot(self):
+        source = self.read(WIFI_CONNECT)
+        postinst = self.read(REPO_ROOT / "packaging" / "DEBIAN" / "postinst")
+        self.assertIn('PINS_HOTSPOT_AUTOCONNECT_PRIORITY:-0', source)
+        self.assertIn('PINS_CLIENT_AUTOCONNECT_PRIORITY:-100', source)
+        self.assertIn(
+            'connection.autoconnect-priority "$HOTSPOT_AUTOCONNECT_PRIORITY"',
+            source,
+        )
+        self.assertIn(
+            'connection.autoconnect-priority "$CLIENT_AUTOCONNECT_PRIORITY"',
+            source,
+        )
+        self.assertNotIn('connection.autoconnect-priority 100 || true', source)
+        self.assertIn('profile_mode" = "ap"', postinst)
+        self.assertIn("connection.autoconnect-priority 0", postinst)
+        self.assertIn("connection.autoconnect-priority 100", postinst)
+
     def test_single_adapter_hotspot_is_stopped_before_client_scan(self):
         source = self.read(WIFI_CONNECT)
         stop_position = source.index("Stopping single-adapter hotspot before client scan")
