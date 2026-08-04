@@ -4,8 +4,8 @@ set -e
 echo "Starting system upgrade..."
 ORIGINAL_ARGS=("$@")
 
-TARGET_KERNEL_VERSION="${PINS_TARGET_KERNEL_VERSION:-6.12.75-v8-16k+}"
-TARGET_RPI_UPDATE_HASH="${PINS_TARGET_RPI_UPDATE_HASH:-98655d3ccedba33aeadd0e550229f1496c5bf6f9}"
+TARGET_KERNEL_VERSION="${PINS_TARGET_KERNEL_VERSION:-6.18.39}"
+TARGET_RPI_UPDATE_HASH="${PINS_TARGET_RPI_UPDATE_HASH:-8402891f3ffba8a2f1fb8b975bccb9a2e5c01335}"
 KERNEL_PACKAGE_CANDIDATES=(
     "raspberrypi-kernel"
     "raspberrypi-bootloader"
@@ -149,7 +149,11 @@ enforce_target_kernel_version() {
     echo "Running kernel: ${running_kernel:-unknown}"
     echo "Target kernel:  $TARGET_KERNEL_VERSION"
 
-    if [[ "$running_kernel" == "$TARGET_KERNEL_VERSION" ]]; then
+    # Raspberry Pi kernel release strings append platform/build suffixes, for
+    # example 6.18.39+rpt-rpi-v8. Accept the approved base release and all of
+    # its normal dot/dash/plus suffixed variants as the target version.
+    if [[ "$running_kernel" == "$TARGET_KERNEL_VERSION" \
+        || "$running_kernel" == "$TARGET_KERNEL_VERSION"[-.+]* ]]; then
         echo "Kernel already matches target version."
         return 0
     fi
