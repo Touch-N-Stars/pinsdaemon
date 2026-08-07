@@ -12,7 +12,7 @@ class SystemUpgradeKernelTests(unittest.TestCase):
 
         self.assertIn('PINS_TARGET_KERNEL_VERSION:-6.18.39', source)
         self.assertIn(
-            'PINS_TARGET_RPI_UPDATE_HASH:-8402891f3ffba8a2f1fb8b975bccb9a2e5c01335',
+            'PINS_TARGET_RPI_UPDATE_HASH:-9393d5a5ba364c10219a17c07bdc63c8a6887878',
             source,
         )
         self.assertIn(
