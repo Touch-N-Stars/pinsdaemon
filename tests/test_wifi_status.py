@@ -19,7 +19,7 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
             [
                 "pins-123:802-11-wireless:wlan1",
                 "OtherWifi:802-11-wireless:wlan2",
-                "HomeWifi:802-11-wireless:wlan0",
+                "pins-client-605c408f2ebf168c:802-11-wireless:wlan0",
             ]
         )
 
@@ -30,8 +30,12 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(main.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec):
                 connection_name, interface = await main._read_active_wifi_client_connection()
 
-        self.assertEqual(connection_name, "HomeWifi")
+        self.assertEqual(connection_name, "pins-client-605c408f2ebf168c")
         self.assertEqual(interface, "wlan0")
+
+    def test_managed_client_profile_name_is_not_classified_as_hotspot(self):
+        self.assertFalse(main._is_hotspot_connection_name("pins-client-605c408f2ebf168c"))
+        self.assertTrue(main._is_hotspot_connection_name("pins-ce29c"))
 
     async def test_read_nmcli_ipv4_address_strips_cidr_suffix(self):
         async def fake_create_subprocess_exec(*args, **kwargs):
@@ -46,7 +50,7 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(
             [
                 "pins-123:802-11-wireless:wlan1",
-                "HomeWifi:802-11-wireless:wlan0",
+                "pins-client-605c408f2ebf168c:802-11-wireless:wlan0",
             ]
         )
 
@@ -61,7 +65,7 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
             connections,
             [
                 {
-                    "connectionName": "HomeWifi",
+                    "connectionName": "pins-client-605c408f2ebf168c",
                     "interface": "wlan0",
                     "role": "client",
                     "preferred": "true",
