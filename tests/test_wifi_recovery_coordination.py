@@ -91,17 +91,15 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
 
     def test_client_wifi_wins_autoconnect_priority_over_fallback_hotspot(self):
         source = self.read(WIFI_CONNECT)
+        profile_manager = self.read(REPO_ROOT / "scripts" / "pins-wifi-profile.py")
         postinst = self.read(REPO_ROOT / "packaging" / "DEBIAN" / "postinst")
         self.assertIn('PINS_HOTSPOT_AUTOCONNECT_PRIORITY:-0', source)
-        self.assertIn('PINS_CLIENT_AUTOCONNECT_PRIORITY:-100', source)
+        self.assertIn('PINS_CLIENT_AUTOCONNECT_PRIORITY", "100"', profile_manager)
         self.assertIn(
             'connection.autoconnect-priority "$HOTSPOT_AUTOCONNECT_PRIORITY"',
             source,
         )
-        self.assertIn(
-            'connection.autoconnect-priority "$CLIENT_AUTOCONNECT_PRIORITY"',
-            source,
-        )
+        self.assertIn('"connection.autoconnect-priority", str(CLIENT_AUTOCONNECT_PRIORITY)', profile_manager)
         self.assertNotIn('connection.autoconnect-priority 100 || true', source)
         self.assertIn('profile_mode" = "ap"', postinst)
         self.assertIn("connection.autoconnect-priority 0", postinst)
@@ -110,9 +108,9 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
     def test_single_adapter_hotspot_is_stopped_before_client_scan(self):
         source = self.read(WIFI_CONNECT)
         stop_position = source.index("Stopping single-adapter hotspot before client scan")
-        scan_position = source.index('nmcli device wifi rescan ifname "$CLIENT_IFACE"', stop_position)
-        self.assertLess(stop_position, scan_position)
-        self.assertIn('nmcli connection down "$conn"', source[stop_position:scan_position])
+        manager_position = source.index('"$WIFI_PROFILE_COMMAND"', stop_position)
+        self.assertLess(stop_position, manager_position)
+        self.assertIn('nmcli connection down uuid "$conn"', source[stop_position:manager_position])
 
     def test_package_installs_persistent_journal_configuration(self):
         workflow = self.read(REPO_ROOT / ".github" / "workflows" / "build-deb.yml")

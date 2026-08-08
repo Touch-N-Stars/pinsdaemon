@@ -7,18 +7,20 @@ COORDINATION_LOCK_FILE="/run/pins-wifi-coordination.lock"
 COORDINATION_LOCK_WAIT_SECONDS="${PINS_WIFI_COORDINATION_LOCK_WAIT_SECONDS:-30}"
 DEFAULT_WIFI_INTERFACE="wlan0"
 RIG_NAME_COMMAND="${PINS_RIG_NAME_COMMAND:-/usr/local/bin/pins-rig-name}"
+WIFI_PROFILE_COMMAND="${PINS_WIFI_PROFILE_COMMAND:-/usr/local/bin/pins-wifi-profile.py}"
 NM_DNSMASQ_SHARED_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 PINS_LOCAL_ONLY_DHCP_CONF="$NM_DNSMASQ_SHARED_DIR/pins-local-only.conf"
 HOTSPOT_IPV4_CIDR="${PINS_HOTSPOT_IPV4_CIDR:-10.42.0.1/24}"
 HOTSPOT_IPV4_ADDRESS="${HOTSPOT_IPV4_CIDR%%/*}"
 HOTSPOT_AUTOCONNECT_PRIORITY="${PINS_HOTSPOT_AUTOCONNECT_PRIORITY:-0}"
-CLIENT_AUTOCONNECT_PRIORITY="${PINS_CLIENT_AUTOCONNECT_PRIORITY:-100}"
 FORCE_HOTSPOT=false
 CLIENT_IFACE=""
 HOTSPOT_IFACE=""
 PARALLEL_WIFI_MODE=false
 EXPLICIT_CLIENT_IFACE=false
 EXPLICIT_HOTSPOT_IFACE=false
+PASSWORD_STDIN=false
+AUTO_CONNECT="no"
 
 # Parse flags while keeping positional support for backward compatibility.
 POSITIONAL_ARGS=()
@@ -38,6 +40,18 @@ while [[ "$#" -gt 0 ]]; do
             EXPLICIT_HOTSPOT_IFACE=true
             shift 2
             ;;
+        --password-stdin)
+            PASSWORD_STDIN=true
+            shift
+            ;;
+        --auto-connect)
+            AUTO_CONNECT="$2"
+            shift 2
+            ;;
+        --band)
+            BAND="$2"
+            shift 2
+            ;;
         --)
             shift
             while [[ "$#" -gt 0 ]]; do
@@ -54,7 +68,15 @@ done
 
 SSID="${POSITIONAL_ARGS[0]:-}"
 PASSWORD="${POSITIONAL_ARGS[1]:-}"
-BAND="${POSITIONAL_ARGS[2]:-}" # "a" for 5GHz, "bg" for 2.4GHz
+BAND="${BAND:-${POSITIONAL_ARGS[2]:-}}" # "a" for 5GHz, "bg" for 2.4GHz
+
+if [ "$PASSWORD_STDIN" = true ]; then
+    IFS= read -r PASSWORD || PASSWORD=""
+fi
+
+if [ "$AUTO_CONNECT" != "yes" ]; then
+    AUTO_CONNECT="no"
+fi
 
 get_wifi_interface_from_config() {
     local key="$1"
@@ -112,9 +134,33 @@ find_secondary_wifi_interface() {
 is_hotspot_active_on_interface() {
     local iface="$1"
 
-    nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
-        | awk -F: -v target_iface="$iface" '$2=="802-11-wireless" && $3==target_iface {print $1}' \
-        | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
+    while IFS=: read -r profile_uuid profile_type profile_iface; do
+        [ "$profile_type" = "802-11-wireless" ] || continue
+        [ "$profile_iface" = "$iface" ] || continue
+        [ "$(nmcli -g 802-11-wireless.mode connection show uuid "$profile_uuid" 2>/dev/null || true)" = "ap" ] && return 0
+    done < <(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null)
+    return 1
+}
+
+list_hotspot_profile_uuids() {
+    while IFS=: read -r profile_uuid profile_type; do
+        [ "$profile_type" = "802-11-wireless" ] || continue
+        [ -n "$profile_uuid" ] || continue
+        if [ "$(nmcli -g 802-11-wireless.mode connection show uuid "$profile_uuid" 2>/dev/null || true)" = "ap" ]; then
+            printf '%s\n' "$profile_uuid"
+        fi
+    done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null)
+}
+
+deactivate_hotspot_on_interface() {
+    local iface="$1"
+    while IFS=: read -r profile_uuid profile_type profile_iface; do
+        [ "$profile_type" = "802-11-wireless" ] || continue
+        [ "$profile_iface" = "$iface" ] || continue
+        if [ "$(nmcli -g 802-11-wireless.mode connection show uuid "$profile_uuid" 2>/dev/null || true)" = "ap" ]; then
+            nmcli connection down uuid "$profile_uuid" >/dev/null 2>&1 || true
+        fi
+    done < <(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null)
 }
 
 hotspot_postcondition_met() {
@@ -307,11 +353,11 @@ enable_hotspot() {
     nmcli device disconnect "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
 
     # Remove legacy hotspot profiles so nmcli creates a fresh AP with current password.
-    existing_hotspots=$(nmcli -t -f NAME,TYPE connection show 2>/dev/null | grep -E "^(Hotspot|hotspot-ap):802-11-wireless" | cut -d: -f1)
+    existing_hotspots=$(list_hotspot_profile_uuids)
     if [ -n "$existing_hotspots" ]; then
         while IFS= read -r conn; do
             if [ -n "$conn" ]; then
-                nmcli connection delete "$conn" >/dev/null 2>&1 || true
+                nmcli connection delete uuid "$conn" >/dev/null 2>&1 || true
             fi
         done <<< "$existing_hotspots"
     fi
@@ -438,149 +484,61 @@ if [ -z "$SSID" ]; then
     exit 1
 fi
 
-# Check if we are already connected to the target SSID
-ACTIVE_SSID=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | grep ":802-11-wireless:$CLIENT_IFACE" | cut -d: -f1 | head -n1)
-
-if [ "$ACTIVE_SSID" == "$SSID" ]; then
-    # If band is specified, we check if we need to switch bands
-    if [ -n "$BAND" ]; then
-        echo "Already connected, but band preference selected ($BAND). Verifying settings..."
-        # We proceed to standard connection logic to ensure band settings are applied
-    else
-        echo "Already connected to $SSID."
-        exit 0
-    fi
-fi
-
-echo "Preparing to connect to $SSID..."
+echo "Preparing managed client Wi-Fi connection..."
 
 # 0. A single radio cannot scan/connect while it is still serving the AP.
 # Deactivate and remove the hotspot profile before asking NetworkManager to
 # return that radio to managed/client mode.
 if [ "$PARALLEL_WIFI_MODE" = false ]; then
     echo "Stopping single-adapter hotspot before client scan..."
-    existing_hotspots=$(nmcli -t -f NAME connection show | grep -E "^(Hotspot|hotspot-ap)")
+    existing_hotspots=$(list_hotspot_profile_uuids)
 
     if [ -n "$existing_hotspots" ]; then
         while IFS= read -r conn; do
             if [ -n "$conn" ]; then
-                nmcli connection down "$conn" >/dev/null 2>&1 || true
-                echo "Removing hotspot connection: $conn"
-                nmcli connection delete "$conn" || true
+                nmcli connection down uuid "$conn" >/dev/null 2>&1 || true
+                echo "Removing single-adapter hotspot profile."
+                nmcli connection delete uuid "$conn" || true
             fi
         done <<< "$existing_hotspots"
     fi
     nmcli device disconnect "$CLIENT_IFACE" >/dev/null 2>&1 || true
 fi
 
-# 1. Force a rescan to ensure we know the security type
-# We run this in the background/wait briefly or just run it.
-# Sometimes rescan fails if busy, we ignore error.
-nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
-# Give it a moment to populate
-sleep 3
-
 if [ "$PARALLEL_WIFI_MODE" = true ]; then
-    echo "Parallel Wi-Fi mode active. Keeping hotspot profile on $HOTSPOT_IFACE."
-fi
-
-# 2. Prepare any EXISTING profile for the target SSID
-# We only delete the profile if we actually intend to update it with a new password
-# BUT, deleting it makes "device connect" rely purely on scan results, which can be flaky.
-# Instead, we should try to modify the existing connection if it exists, or verify the network is visible.
-
-if [ -n "$PASSWORD" ]; then
-    # If a profile exists, we can try to update its password instead of deleting/recreating
-    if nmcli connection show "$SSID" >/dev/null 2>&1; then
-        echo "Updating existing connection profile for $SSID..."
-        nmcli connection modify "$SSID" wifi-sec.psk "$PASSWORD" || true
-        # Ensure WPA key management is present when using a password.
-        nmcli connection modify "$SSID" wifi-sec.key-mgmt wpa-psk || true
-    fi
-fi
-
-if nmcli connection show "$SSID" >/dev/null 2>&1; then
-    nmcli connection modify "$SSID" connection.interface-name "$CLIENT_IFACE" || true
-    nmcli connection modify "$SSID" connection.autoconnect yes || true
-    nmcli connection modify "$SSID" connection.autoconnect-priority "$CLIENT_AUTOCONNECT_PRIORITY" || true
-fi
-
-# 3. Connect to the new wifi network
-echo "Connecting to $SSID..."
-
-CONNECT_SUCCESS=0
-
-# Loop to retry connection if "No network found" occurs (scan timing issue)
-MAX_RETRIES=2
-count=0
-CONNECT_SUCCESS=1 # Default to failure unless proven otherwise
-
-while [ $count -lt $MAX_RETRIES ]; do
-    # Logic to prefer existing connection
-    # We try "connection up" first if profile exists (whether we just updated pw or not)
-    # BUT, if we have a NEW password provided in arguments, "connection up" might use the OLD password stored in the profile
-    # unless we successfully modified it above. If modification failed or didn't happen, we might need to be careful.
-    # However, since we did 'nmcli connection modify' above, 'connection up' should use the new password.
-    
-    if nmcli connection show "$SSID" >/dev/null 2>&1; then
-        echo "Found existing profile for $SSID. Attempting to bring it up..."
-        if nmcli connection up "$SSID" ifname "$CLIENT_IFACE"; then
-            CONNECT_SUCCESS=0
-            break
-        else
-            echo "Failed to bring up existing connection." 
-            # If we failed to bring it up, it might be due to wrong interface or other issues.
-            # We will fall through to 'device wifi connect' which is more aggressive.
+    deactivate_hotspot_on_interface "$CLIENT_IFACE"
+    if ! is_hotspot_active_on_interface "$HOTSPOT_IFACE"; then
+        echo "Parallel Wi-Fi mode: moving fallback hotspot to $HOTSPOT_IFACE."
+        if ! enable_hotspot; then
+            echo "PINS_WIFI_RESULT code=HOTSPOT_SWITCH_FAILED message=Could_not_prepare_dedicated_hotspot_adapter"
+            exit 1
         fi
     fi
-
-    # Fallback to device connect (creates new profile if missing, or updates existing if arguments provided)
-        CMD=("nmcli" "device" "wifi" "connect" "$SSID" "ifname" "$CLIENT_IFACE")
-    if [ -n "$PASSWORD" ]; then
-         CMD+=("password" "$PASSWORD" "name" "$SSID")
-    fi
-
-    # Execute connection command (avoid logging sensitive arguments)
-    if [ -n "$PASSWORD" ]; then
-        echo "Executing: nmcli device wifi connect $SSID ifname $CLIENT_IFACE password *** name $SSID"
-    else
-        echo "Executing: nmcli device wifi connect $SSID ifname $CLIENT_IFACE"
-    fi
-    "${CMD[@]}" && { CONNECT_SUCCESS=0; break; } || {
-        echo "Connection attempt failed. Retrying scan..."
-        nmcli device wifi rescan ifname "$CLIENT_IFACE" 2>/dev/null || true
-        # Wait a bit longer for scan results to propagate
-        sleep 8
-        count=$((count + 1))
-    }
-done
-
-if [ $CONNECT_SUCCESS -ne 0 ]; then
-   echo "Failed to connect to $SSID after multiple attempts."
-   enable_hotspot || echo "Hotspot fallback failed."
-   exit 1
+    echo "Parallel Wi-Fi mode active. Keeping hotspot on $HOTSPOT_IFACE."
 fi
 
-echo "Successfully connected to $SSID."
-
-if [ -n "$BAND" ]; then
-    echo "Applying band preference: $BAND"
-    # Use 802-11-wireless.band for better compatibility
-    if nmcli connection modify "$SSID" 802-11-wireless.band "$BAND"; then
-        echo "Reactivating connection with band preference settings..."
-        nmcli connection up "$SSID" ifname "$CLIENT_IFACE" || true
-    else
-        echo "Warning: Failed to set wifi band to $BAND"
-    fi
-fi
-
-if [ $CONNECT_SUCCESS -ne 0 ]; then
-    echo "Failed to connect to $SSID."
-    enable_hotspot
+if [ ! -x "$WIFI_PROFILE_COMMAND" ]; then
+    echo "PINS_WIFI_RESULT code=UNKNOWN message=Wi-Fi_profile_manager_is_unavailable"
+    enable_hotspot || echo "PINS_WIFI_RESULT code=HOTSPOT_SWITCH_FAILED message=Hotspot_rollback_failed"
     exit 1
 fi
 
-echo "Successfully connected to $SSID."
+if ! printf '%s\n' "$PASSWORD" | "$WIFI_PROFILE_COMMAND" \
+    --client-iface "$CLIENT_IFACE" \
+    --hotspot-iface "$HOTSPOT_IFACE" \
+    --ssid "$SSID" \
+    --band "$BAND" \
+    --auto-connect "$AUTO_CONNECT" \
+    --config-file "$WIFI_CONFIG_FILE"; then
+    PASSWORD=""
+    if ! enable_hotspot; then
+        echo "PINS_WIFI_RESULT code=HOTSPOT_SWITCH_FAILED message=Hotspot_rollback_failed"
+    fi
+    exit 1
+fi
+PASSWORD=""
+
+echo "Client Wi-Fi connection verified."
 
 if [ "$PARALLEL_WIFI_MODE" = true ]; then
     if ! is_hotspot_active_on_interface "$HOTSPOT_IFACE"; then
@@ -591,13 +549,4 @@ if [ "$PARALLEL_WIFI_MODE" = true ]; then
     fi
 fi
 
-# Optional: Disable powersave on client connection too
-# Filter specifically for wireless connections to avoid configuring ethernet connections
-CURRENT_CONN=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | grep ":802-11-wireless:$CLIENT_IFACE" | cut -d: -f1 | head -n1)
-if [ -n "$CURRENT_CONN" ]; then
-    nmcli connection modify "$CURRENT_CONN" connection.autoconnect yes || true
-    nmcli connection modify "$CURRENT_CONN" connection.autoconnect-priority "$CLIENT_AUTOCONNECT_PRIORITY" || true
-    nmcli connection modify "$CURRENT_CONN" 802-11-wireless.powersave 2 || true
-fi
 exit 0
-

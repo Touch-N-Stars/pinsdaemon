@@ -65,6 +65,11 @@ if [ -f "/usr/local/bin/wifi-connect.sh" ]; then
     chmod 755 /usr/local/bin/wifi-connect.sh
 fi
 
+if [ -f "/usr/local/bin/pins-wifi-profile.py" ]; then
+    chown root:root /usr/local/bin/pins-wifi-profile.py
+    chmod 755 /usr/local/bin/pins-wifi-profile.py
+fi
+
 if [ -f "/usr/local/bin/pins-rig-name" ]; then
     chown root:root /usr/local/bin/pins-rig-name
     chmod 755 /usr/local/bin/pins-rig-name

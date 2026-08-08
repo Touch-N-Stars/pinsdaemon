@@ -19,6 +19,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "client_interface": "wlan0",
     "hotspot_interface": "wlan0",
     "desired_mode": NETWORK_MODE_AUTO,
+    "client_profile_uuid": None,
 }
 
 
@@ -77,6 +78,7 @@ def save_wifi_config(
     client_interface: Optional[str] = None,
     hotspot_interface: Optional[str] = None,
     desired_mode: Optional[str] = None,
+    client_profile_uuid: Optional[str] = None,
 ):
     current = load_wifi_config()
     config = {
@@ -87,6 +89,11 @@ def save_wifi_config(
         "hotspot_interface": hotspot_interface if hotspot_interface is not None else current.get("hotspot_interface", "wlan0"),
         "desired_mode": normalize_network_mode(
             desired_mode if desired_mode is not None else current.get("desired_mode")
+        ),
+        "client_profile_uuid": (
+            client_profile_uuid
+            if client_profile_uuid is not None
+            else current.get("client_profile_uuid")
         ),
     }
     _atomic_write_config(config)

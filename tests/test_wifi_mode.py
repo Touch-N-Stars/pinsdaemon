@@ -153,7 +153,7 @@ class WifiInterfaceFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(interfaces, ("wlan0", "wlan0"))
 
-    async def test_connect_heals_stale_optional_hotspot_interface_without_http_400(self):
+    async def test_connect_persists_only_resolved_roles_before_background_job_succeeds(self):
         wifi_config.save_wifi_config(
             None,
             False,
@@ -187,10 +187,29 @@ class WifiInterfaceFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--client-iface", command)
         self.assertEqual(command[command.index("--client-iface") + 1], "wlan0")
         self.assertEqual(command[command.index("--hotspot-iface") + 1], "wlan0")
+        self.assertIn("--password-stdin", command)
+        self.assertNotIn("secret", command)
+        self.assertEqual(start_job.await_args.kwargs["stdin_data"], b"secret\n")
         self.assertEqual(result.jobId, "job-1")
         config = wifi_config.load_wifi_config()
+        self.assertEqual(config["ssid"], None)
+        self.assertFalse(config["auto_connect"])
         self.assertEqual(config["hotspot_interface"], "wlan0")
-        self.assertEqual(config["desired_mode"], wifi_config.NETWORK_MODE_AUTO)
+        self.assertEqual(config["desired_mode"], wifi_config.NETWORK_MODE_HOTSPOT)
+
+    async def test_optional_second_adapter_is_used_for_hotspot_by_default(self):
+        wifi_config.save_wifi_config(
+            None,
+            False,
+            client_interface="wlan0",
+            hotspot_interface="wlan0",
+        )
+        adapters = [SimpleNamespace(interface="wlan0"), SimpleNamespace(interface="wlan1")]
+
+        with patch.object(main, "_list_wifi_adapters", new=AsyncMock(return_value=adapters)):
+            interfaces = await main._resolve_wifi_interfaces()
+
+        self.assertEqual(interfaces, ("wlan0", "wlan1"))
 
     async def test_explicit_unknown_adapter_is_still_rejected(self):
         adapters = [SimpleNamespace(interface="wlan0")]
