@@ -328,6 +328,12 @@ def connect(args: argparse.Namespace, password: str, nm: Nmcli) -> str:
         result = nm.run(["connection", "modify", "uuid", profile_uuid, "802-11-wireless.band", args.band])
         if result.returncode != 0:
             raise WifiFailure("ASSOCIATION_FAILED", "Failed_to_apply_band_preference")
+    result = nm.run([
+        "connection", "modify", "uuid", profile_uuid,
+        "connection.autoconnect", "yes" if args.auto_connect else "no",
+    ])
+    if result.returncode != 0:
+        raise WifiFailure("UNKNOWN", "Failed_to_apply_autoconnect_policy")
     nm.run(["connection", "modify", "uuid", profile_uuid, "connection.autoconnect-priority", "100"])
     _persist_success(config_path, ssid=args.ssid, auto_connect=args.auto_connect, band=args.band, client=args.client_iface, hotspot=args.hotspot_iface, profile_uuid=profile_uuid)
     return profile_uuid
