@@ -481,6 +481,8 @@ async def _resolve_wifi_interfaces(
     hotspot_interface = requested_hotspot or (
         configured_hotspot if configured_hotspot in available_set else client_interface
     )
+    if requested_hotspot is None and hotspot_interface == client_interface and len(available) > 1:
+        hotspot_interface = next(interface for interface in available if interface != client_interface)
     return client_interface, hotspot_interface
 
 
@@ -993,6 +995,8 @@ class JobResponse(BaseModel):
     startedAt: float
     finishedAt: Optional[float]
     command: str
+    errorCode: Optional[str] = None
+    errorMessage: Optional[str] = None
 
 
 class WifiModeOperationResponse(BaseModel):
@@ -1554,6 +1558,8 @@ def _job_response_from_runtime_job(job) -> JobResponse:
         startedAt=job.created_at,
         finishedAt=job.finished_at,
         command=job.command,
+        errorCode=getattr(job, "error_code", None),
+        errorMessage=getattr(job, "error_message", None),
     )
 
 
@@ -2358,17 +2364,19 @@ async def connect_wifi(request: WifiConnectRequest):
 
     cmd = [
         "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
+        "--password-stdin",
         "--client-iface", client_interface,
         "--hotspot-iface", hotspot_interface,
+        "--auto-connect", "yes" if request.auto_connect else "no",
         request.ssid,
-        request.password or "",
     ]
     masked_cmd = [
         "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH,
+        "--password-stdin",
         "--client-iface", client_interface,
         "--hotspot-iface", hotspot_interface,
+        "--auto-connect", "yes" if request.auto_connect else "no",
         request.ssid,
-        "***" if request.password else "",
     ]
     
     # Translate band to nmcli format if present
@@ -2383,35 +2391,28 @@ async def connect_wifi(request: WifiConnectRequest):
         masked_cmd.append(wifi_band)
 
     # Note: connect script now handles 3rd argument as BAND
-    
-    # Always persist the reconciled adapter roles. Credentials/SSID remain
-    # persistent only when auto-connect was explicitly requested.
-    if request.auto_connect:
-        save_wifi_config(
-            request.ssid,
-            True,
-            request.band,
-            client_interface=client_interface,
-            hotspot_interface=hotspot_interface,
-            desired_mode=NETWORK_MODE_AUTO,
-        )
-    else:
-        # A deliberate client connection leaves persistent field mode and returns
-        # the reconciler to automatic client-with-hotspot-fallback behavior.
-        current = load_wifi_config()
-        save_wifi_config(
-            current.get("ssid"),
-            bool(current.get("auto_connect", False)),
-            current.get("band"),
-            client_interface=client_interface,
-            hotspot_interface=hotspot_interface,
-            desired_mode=NETWORK_MODE_AUTO,
-        )
+
+    # Persist only the reconciled hardware roles before the job. The desired
+    # SSID/profile remains transactional and is committed by the privileged
+    # profile manager only after activation and IPv4 postconditions succeed.
+    current = load_wifi_config()
+    save_wifi_config(
+        current.get("ssid"),
+        bool(current.get("auto_connect", False)),
+        current.get("band"),
+        client_interface=client_interface,
+        hotspot_interface=hotspot_interface,
+        desired_mode=current.get("desired_mode"),
+    )
     
     # Check if script exists (only nice to have check, the job will fail if not found)
     # But locally on windows it's different path.
     
-    job_id = await job_manager.start_job(cmd, display_command=" ".join(masked_cmd))
+    job_id = await job_manager.start_job(
+        cmd,
+        display_command=" ".join(masked_cmd),
+        stdin_data=((request.password or "") + "\n").encode("utf-8"),
+    )
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not created")

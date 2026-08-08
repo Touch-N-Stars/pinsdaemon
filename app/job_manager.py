@@ -22,6 +22,8 @@ class Job:
     created_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
     exit_code: Optional[int] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
     logs: List[str] = field(default_factory=list)
     # Queues for active websocket listeners
     listeners: List[asyncio.Queue] = field(default_factory=list)
@@ -56,6 +58,7 @@ class JobManager:
         command: List[str],
         job_id: Optional[str] = None,
         display_command: Optional[str] = None,
+        stdin_data: Optional[bytes] = None,
     ) -> str:
         if not job_id:
             job_id = str(uuid.uuid4())
@@ -64,7 +67,7 @@ class JobManager:
         append_local_log("jobs", f"job {job_id} started: {job.command}")
         
         # Start background task to run the process
-        asyncio.create_task(self._run_process(job_id, command))
+        asyncio.create_task(self._run_process(job_id, command, stdin_data=stdin_data))
         
         return job_id
 
@@ -190,7 +193,7 @@ class JobManager:
         for listener in job.listeners:
             await listener.put(None)
 
-    async def _run_process(self, job_id: str, command: List[str]):
+    async def _run_process(self, job_id: str, command: List[str], stdin_data: Optional[bytes] = None):
         job = self.jobs.get(job_id)
         if not job:
             return
@@ -202,9 +205,15 @@ class JobManager:
             # Create subprocess
             process = await asyncio.create_subprocess_exec(
                 *command,
+                stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT 
             )
+
+            if stdin_data is not None and process.stdin is not None:
+                process.stdin.write(stdin_data)
+                await process.stdin.drain()
+                process.stdin.close()
 
             # Read output line by line
             while True:
@@ -215,6 +224,16 @@ class JobManager:
                 decoded_line = self._sanitize_log_line(line.decode(errors='replace').strip())
                 if decoded_line: 
                     await job.add_log(decoded_line)
+                    if decoded_line.startswith("PINS_WIFI_RESULT "):
+                        fields = dict(
+                            item.split("=", 1)
+                            for item in decoded_line.removeprefix("PINS_WIFI_RESULT ").split()
+                            if "=" in item
+                        )
+                        code = fields.get("code")
+                        if code and code != "SUCCESS":
+                            job.error_code = code
+                            job.error_message = fields.get("message", "Wi-Fi_operation_failed").replace("_", " ")
                     # Check for detachment
                     if "Running as unit:" in decoded_line:
                         # Extract unit name, e.g. "Running as unit: pins-sysupgrade-123.service"

@@ -71,6 +71,8 @@ def resolve_wifi_interfaces(config):
     default_interface = DEFAULT_WIFI_INTERFACE if DEFAULT_WIFI_INTERFACE in available else available[0]
     client_iface = configured_client if configured_client in available else default_interface
     hotspot_iface = configured_hotspot if configured_hotspot in available else client_iface
+    if hotspot_iface == client_iface and len(available) > 1:
+        hotspot_iface = next(interface for interface in available if interface != client_iface)
     if (client_iface, hotspot_iface) != (configured_client, configured_hotspot):
         print(
             "Configured Wi-Fi adapter is unavailable; using "
@@ -117,14 +119,15 @@ def connect_to_wifi(ssid, band=None, client_interface=DEFAULT_WIFI_INTERFACE, ho
     print(f"Attempting to connect to {ssid} (Band: {band}, client={client_interface}, hotspot={hotspot_interface})...")
     try:
         args = wifi_connect_cmd(
+            "--password-stdin",
             "--client-iface", client_interface,
             "--hotspot-iface", hotspot_interface,
+            "--auto-connect", "yes",
+            "--band", band if band else "",
             ssid,
-            "",
-            band if band else "",
         )
 
-        result = subprocess.run(args)
+        result = subprocess.run(args, input="\n", text=True)
         return result.returncode == 0
             
     except Exception as e:

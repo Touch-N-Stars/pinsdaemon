@@ -202,6 +202,10 @@ Runtime behavior:
 - It retries reconnection to the configured auto-connect SSID (default: 3 attempts, 5s backoff).
 - If retries fail, it enables the device hotspot automatically.
 - PINS-managed client Wi-Fi profiles use NetworkManager autoconnect priority `100`; the fallback hotspot uses priority `0`. On boot, an available saved client network therefore wins. Recovery still activates the hotspot explicitly after client retries fail, so fallback behavior does not depend on autoconnect priority.
+- NetworkManager is the only durable owner of client credentials. The password is transported to the privileged connection job over stdin, is never written to `wifi_config.json`, and is not included in job commands or logs.
+- New client profiles use deterministic PINS connection IDs and UUIDs. Automatic recovery activates the saved UUID only; it never retries a secured network without a stored NetworkManager secret.
+- `wifi_config.json` is updated atomically only after the requested profile is active on the selected client interface and has an IPv4 address. A failed request keeps the previous desired network and rolls back to the hotspot.
+- With two Wi-Fi adapters, the internal adapter remains the default client and the optional second adapter hosts the hotspot. With one adapter, the hotspot is stopped before the client attempt and restored on failure.
 - `pins-wifi-watchdog.timer` also runs `pins-wifi-watchdog.sh` every 10s to actively ping the client interface's default gateway. This does not depend on NetworkManager deciding a disconnect happened: it covers the case where the Wi-Fi client stays reported as "connected" while the router/AP behind it is actually unreachable, which never fires a dispatcher event and would otherwise leave the device stranded. After 3 consecutive failed checks (~30 seconds) it forces the fallback hotspot the same way the dispatcher hook does.
 - The dispatcher, watchdog, and manual/API Wi-Fi connection path share `/run/pins-wifi-coordination.lock`. A kernel-managed exclusive lock serializes their complete NetworkManager operations so client and hotspot activation cannot race on a single Wi-Fi radio.
 - Recovery state transitions are written to the daily on-disk Wi-Fi logs, including restored client connectivity, confirmed hotspot activation, and failed hotspot attempts.
@@ -217,7 +221,7 @@ Runtime behavior:
     "band": "2.4GHz"
   }
   ```
-- **Response**: `JobResponse` object.
+- **Response**: `JobResponse` object. Completed failed jobs may additionally contain `errorCode` and `errorMessage`; Wi-Fi codes include `MISSING_CREDENTIALS`, `INVALID_CREDENTIALS`, `NETWORK_NOT_FOUND`, `PROFILE_NOT_FOUND`, `ASSOCIATION_FAILED`, `IP_CONFIGURATION_FAILED`, `INTERFACE_UNAVAILABLE`, `HOTSPOT_SWITCH_FAILED`, and `UNKNOWN`.
 
 ### 7. Wi-Fi Disable (Force Hotspot)
 
