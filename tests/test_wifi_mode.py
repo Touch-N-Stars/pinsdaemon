@@ -178,6 +178,7 @@ class WifiInterfaceFallbackTests(unittest.IsolatedAsyncioTestCase):
                         main.WifiConnectRequest(
                             ssid="Home",
                             password="secret",
+                            band="5GHz",
                             client_interface="wlan0",
                             hotspot_interface=None,
                         )
@@ -188,6 +189,7 @@ class WifiInterfaceFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index("--client-iface") + 1], "wlan0")
         self.assertEqual(command[command.index("--hotspot-iface") + 1], "wlan0")
         self.assertIn("--password-stdin", command)
+        self.assertEqual(command[command.index("--band") + 1], "a")
         self.assertNotIn("secret", command)
         self.assertEqual(start_job.await_args.kwargs["stdin_data"], b"secret\n")
         self.assertEqual(result.jobId, "job-1")

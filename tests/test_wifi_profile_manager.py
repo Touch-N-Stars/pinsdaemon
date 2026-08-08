@@ -134,6 +134,25 @@ class SavedProfileTests(unittest.TestCase):
         ), patch.object(wifi, "_activate") as activate, patch.object(wifi, "_persist_success"):
             self.assertEqual(wifi.connect(args, "", nm), "saved")
         activate.assert_called_once_with(nm, "saved", "wlan0", False)
+        self.assertIn(
+            ["connection", "modify", "uuid", "saved", "connection.autoconnect", "yes"],
+            nm.calls,
+        )
+
+    def test_manual_saved_profile_connection_disables_networkmanager_autoconnect(self):
+        args = SimpleNamespace(
+            config_file="unused", client_iface="wlan0", hotspot_iface="wlan0",
+            ssid="Home", band="", auto_connect=False,
+        )
+        nm = FakeNmcli([wifi.CommandResult(0)])
+        with patch.object(wifi, "_load_config", return_value={"client_profile_uuid": "saved"}), patch.object(
+            wifi, "_find_saved_profile", return_value="saved"
+        ), patch.object(wifi, "_activate"), patch.object(wifi, "_persist_success"):
+            self.assertEqual(wifi.connect(args, "", nm), "saved")
+        self.assertIn(
+            ["connection", "modify", "uuid", "saved", "connection.autoconnect", "no"],
+            nm.calls,
+        )
 
 
 class TransactionTests(unittest.TestCase):

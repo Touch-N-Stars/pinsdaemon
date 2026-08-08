@@ -2392,10 +2392,8 @@ async def connect_wifi(request: WifiConnectRequest):
         wifi_band = "a"
         
     if wifi_band:
-        cmd.append(wifi_band)
-        masked_cmd.append(wifi_band)
-
-    # Note: connect script now handles 3rd argument as BAND
+        cmd.extend(["--band", wifi_band])
+        masked_cmd.extend(["--band", wifi_band])
 
     # Persist only the reconciled hardware roles before the job. The desired
     # SSID/profile remains transactional and is committed by the privileged
@@ -3148,4 +3146,3 @@ async def download_diagnostics_archive(archive_id: str):
         media_type="application/zip",
         filename=archive_name or f"pins-diagnostics-{archive_id}.zip",
     )
-
