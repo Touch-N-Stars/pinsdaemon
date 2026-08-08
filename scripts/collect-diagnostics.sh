@@ -142,6 +142,10 @@ if [ "$INCLUDE_SYSTEM_INFO" -eq 1 ]; then
     run_command "$OUTPUT_DIR/system/systemctl-pins.txt" systemctl status pins --no-pager
     run_command "$OUTPUT_DIR/system/systemctl-pins-service.txt" systemctl status pins.service --no-pager
     run_command "$OUTPUT_DIR/system/systemctl-sysupdate-api.txt" systemctl status sysupdate-api --no-pager
+    run_command "$OUTPUT_DIR/system/systemctl-networkmanager.txt" systemctl status NetworkManager.service --no-pager
+    run_command "$OUTPUT_DIR/system/systemctl-hotspot-setup.txt" systemctl status hotspot-setup.service --no-pager
+    run_command "$OUTPUT_DIR/system/systemctl-wifi-watchdog.txt" systemctl status pins-wifi-watchdog.timer pins-wifi-watchdog.service --no-pager
+    run_command "$OUTPUT_DIR/system/systemctl-dnsmasq.txt" systemctl status dnsmasq.service --no-pager
 fi
 
 if [ "$INCLUDE_PINS_JOURNAL" -eq 1 ]; then
@@ -152,6 +156,9 @@ fi
 if [ "$INCLUDE_API_JOURNAL" -eq 1 ]; then
     run_command "$OUTPUT_DIR/logs/journal-sysupdate-api.txt" journalctl -u sysupdate-api -n "$JOURNAL_LINES" --no-pager
     run_command "$OUTPUT_DIR/logs/journal-sysupdate-api-service.txt" journalctl -u sysupdate-api.service -n "$JOURNAL_LINES" --no-pager
+    run_command "$OUTPUT_DIR/logs/journal-networkmanager.txt" journalctl -u NetworkManager.service -n "$JOURNAL_LINES" --no-pager
+    run_command "$OUTPUT_DIR/logs/journal-wifi-recovery.txt" journalctl -t pins-wifi-recovery -n "$JOURNAL_LINES" --no-pager
+    run_command "$OUTPUT_DIR/logs/journal-wifi-watchdog.txt" journalctl -t pins-wifi-watchdog -n "$JOURNAL_LINES" --no-pager
     if [ -d "$PINSDAEMON_LOG_DIR" ]; then
         mkdir -p "$OUTPUT_DIR/logs/pinsdaemon-local"
         find "$PINSDAEMON_LOG_DIR" -maxdepth 1 -type f -name '*.log' -mtime -5 -print0 \
@@ -175,10 +182,15 @@ fi
 if [ "$INCLUDE_NETWORK_INFO" -eq 1 ]; then
     run_command "$OUTPUT_DIR/network/nmcli-device-status.txt" nmcli device status
     run_command "$OUTPUT_DIR/network/nmcli-active-connections.txt" nmcli connection show --active
+    run_command "$OUTPUT_DIR/network/nmcli-connections.txt" nmcli -f NAME,UUID,TYPE,DEVICE,AUTOCONNECT,AUTOCONNECT-PRIORITY connection show
     run_command "$OUTPUT_DIR/network/ip-address.txt" ip address
     run_command "$OUTPUT_DIR/network/ip-route.txt" ip route
+    run_command "$OUTPUT_DIR/network/listening-sockets.txt" ss -lntup
     run_command "$OUTPUT_DIR/network/rfkill.txt" rfkill list
     run_command "$OUTPUT_DIR/network/iw-dev.txt" iw dev
+    if [ -f /opt/pinsdaemon/app/wifi_config.json ]; then
+        run_command "$OUTPUT_DIR/network/wifi-config.txt" cat /opt/pinsdaemon/app/wifi_config.json
+    fi
 fi
 
 if [ "$INCLUDE_KERNEL_MODULES" -eq 1 ]; then

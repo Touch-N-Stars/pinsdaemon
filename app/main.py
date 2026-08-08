@@ -646,12 +646,37 @@ def _parse_nmcli_row(line: str) -> list[str]:
 
 
 def _is_hotspot_connection_name(name: str) -> bool:
-    # Transactional client profiles deliberately use the stable
-    # ``pins-client-<ssid hash>`` namespace.  Check it before the legacy
-    # hotspot prefix so active client connections are not reported as APs.
-    if name.startswith("pins-client-"):
-        return False
-    return name in {"Hotspot", "hotspot-ap"} or name.startswith("pins-")
+    # Only a fallback for systems where the profile mode cannot be queried.
+    # A legitimate client SSID/profile may also start with ``pins-``.
+    return name in {"Hotspot", "hotspot-ap"}
+
+
+async def _read_wifi_profile_mode(profile_uuid: str) -> Optional[str]:
+    if not profile_uuid:
+        return None
+    proc = await asyncio.create_subprocess_exec(
+        "nmcli",
+        "-g",
+        "802-11-wireless.mode",
+        "connection",
+        "show",
+        "uuid",
+        profile_uuid,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    mode = stdout.decode(errors="replace").strip().lower()
+    return mode or "infrastructure"
+
+
+async def _wifi_connection_role(profile_uuid: str, name: str) -> str:
+    mode = await _read_wifi_profile_mode(profile_uuid)
+    if mode is not None:
+        return "hotspot" if mode == "ap" else "client"
+    return "hotspot" if _is_hotspot_connection_name(name) else "client"
 
 
 def _band_from_frequency_mhz(frequency_mhz: Optional[float]) -> Optional[str]:
@@ -733,7 +758,7 @@ async def _read_active_wifi_client_connection() -> tuple[Optional[str], Optional
         "nmcli",
         "-t",
         "-f",
-        "NAME,TYPE,DEVICE",
+        "UUID,NAME,TYPE,DEVICE",
         "connection",
         "show",
         "--active",
@@ -749,13 +774,13 @@ async def _read_active_wifi_client_connection() -> tuple[Optional[str], Optional
 
     for raw_line in stdout.decode(errors="replace").splitlines():
         fields = _parse_nmcli_row(raw_line)
-        if len(fields) < 3:
+        if len(fields) < 4:
             continue
 
-        name, conn_type, interface = fields[0], fields[1], fields[2]
+        profile_uuid, name, conn_type, interface = fields[0], fields[1], fields[2], fields[3]
         if conn_type != "802-11-wireless" or not interface:
             continue
-        if _is_hotspot_connection_name(name):
+        if await _wifi_connection_role(profile_uuid, name) == "hotspot":
             continue
 
         candidate = (name or None, interface)
@@ -772,7 +797,7 @@ async def _read_active_wifi_connections() -> list[dict[str, Optional[str]]]:
         "nmcli",
         "-t",
         "-f",
-        "NAME,TYPE,DEVICE",
+        "UUID,NAME,TYPE,DEVICE",
         "connection",
         "show",
         "--active",
@@ -788,14 +813,14 @@ async def _read_active_wifi_connections() -> list[dict[str, Optional[str]]]:
 
     for raw_line in stdout.decode(errors="replace").splitlines():
         fields = _parse_nmcli_row(raw_line)
-        if len(fields) < 3:
+        if len(fields) < 4:
             continue
 
-        name, conn_type, interface = fields[0], fields[1], fields[2]
+        profile_uuid, name, conn_type, interface = fields[0], fields[1], fields[2], fields[3]
         if conn_type != "802-11-wireless" or not interface:
             continue
 
-        role = "hotspot" if _is_hotspot_connection_name(name) else "client"
+        role = await _wifi_connection_role(profile_uuid, name)
         rows.append(
             {
                 "connectionName": name or None,
@@ -875,7 +900,7 @@ async def _list_wifi_adapters() -> list[WifiAdapterInfo]:
         "nmcli",
         "-t",
         "-f",
-        "NAME,TYPE,DEVICE",
+        "UUID,NAME,TYPE,DEVICE",
         "connection",
         "show",
         "--active",
@@ -886,12 +911,12 @@ async def _list_wifi_adapters() -> list[WifiAdapterInfo]:
     if active_proc.returncode == 0:
         for raw_line in active_stdout.decode(errors="replace").splitlines():
             fields = _parse_nmcli_row(raw_line)
-            if len(fields) < 3:
+            if len(fields) < 4:
                 continue
-            name, conn_type, device = fields[0], fields[1], fields[2]
+            profile_uuid, name, conn_type, device = fields[0], fields[1], fields[2], fields[3]
             if conn_type != "802-11-wireless" or not device:
                 continue
-            active_roles[device] = "hotspot" if _is_hotspot_connection_name(name) else "client"
+            active_roles[device] = await _wifi_connection_role(profile_uuid, name)
 
     adapters: list[WifiAdapterInfo] = []
     for raw_line in status_stdout.decode(errors="replace").splitlines():
@@ -926,7 +951,7 @@ async def _list_wifi_adapters() -> list[WifiAdapterInfo]:
 async def is_hotspot_active_on_interface(interface: str) -> bool:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "nmcli", "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
+            "nmcli", "-t", "-f", "UUID,NAME,TYPE,DEVICE", "connection", "show", "--active",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -936,14 +961,14 @@ async def is_hotspot_active_on_interface(interface: str) -> bool:
 
         for line in stdout.decode(errors="replace").splitlines():
             parts = _parse_nmcli_row(line)
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
 
-            name, conn_type, device = parts[0], parts[1], parts[2]
+            profile_uuid, name, conn_type, device = parts[0], parts[1], parts[2], parts[3]
             if conn_type != "802-11-wireless" or device != interface:
                 continue
 
-            if _is_hotspot_connection_name(name):
+            if await _wifi_connection_role(profile_uuid, name) == "hotspot":
                 return True
     except Exception:
         return False

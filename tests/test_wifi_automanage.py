@@ -61,6 +61,14 @@ class WifiAutomanageTests(unittest.TestCase):
         connect.assert_called_once_with("Unavailable WiFi", None, "wlan0", "wlan0")
         start_hotspot.assert_called_once_with("wlan0", "wlan0")
 
+    def test_existing_verified_hotspot_is_not_recreated(self):
+        with patch.object(wifi_automanage, "hotspot_is_ready", return_value=True), patch.object(
+            wifi_automanage.subprocess, "run"
+        ) as run:
+            wifi_automanage.start_hotspot("wlan0", "wlan0")
+
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

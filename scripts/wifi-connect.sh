@@ -198,9 +198,10 @@ ensure_local_only_hotspot_dhcp() {
         return 0
     }
 
-    cat > "$PINS_LOCAL_ONLY_DHCP_CONF" <<'EOF'
+cat > "$PINS_LOCAL_ONLY_DHCP_CONF" <<'EOF'
 # PINS fallback hotspot is local-only: hand out an address, but no gateway/DNS.
 # This keeps phones using LTE/5G for Internet while connected to the device AP.
+port=0
 dhcp-option=3
 dhcp-option=6
 EOF
@@ -395,100 +396,63 @@ enable_hotspot() {
 
     echo "Creating hotspot: $HOTSPOT_SSID"
 
-    # Create new hotspot with dynamic SSID.
-    # NetworkManager can return "activation was enqueued" during transient state changes,
-    # so retry briefly before giving up.
-    HOTSPOT_ENABLED=0
+    # Build the complete AP profile before activating it. The nmcli hotspot
+    # shortcut activates a temporary shared profile immediately; modifying and
+    # reactivating it can race NetworkManager's previous dnsmasq child, leaving
+    # port 53/67 occupied. One fully configured activation avoids that race.
+    HOTSPOT_PROFILE_UUID="$(cat /proc/sys/kernel/random/uuid)"
+    if ! nmcli connection add \
+        type wifi \
+        ifname "$HOTSPOT_IFACE" \
+        con-name Hotspot \
+        ssid "$HOTSPOT_SSID" \
+        connection.uuid "$HOTSPOT_PROFILE_UUID" \
+        connection.autoconnect yes \
+        connection.autoconnect-priority "$HOTSPOT_AUTOCONNECT_PRIORITY" \
+        802-11-wireless.mode ap \
+        802-11-wireless.powersave 2 \
+        ipv4.method shared \
+        ipv4.addresses "$HOTSPOT_IPV4_CIDR" \
+        ipv6.method disabled \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk "$HOTSPOT_PASSWORD" >/dev/null; then
+        echo "Failed to create configured hotspot profile."
+        return 1
+    fi
+
+    if [ -n "$HOTSPOT_BAND" ]; then
+        nmcli connection modify uuid "$HOTSPOT_PROFILE_UUID" 802-11-wireless.band "$HOTSPOT_BAND" || true
+    fi
+    if [ -n "$HOTSPOT_CHANNEL" ]; then
+        nmcli connection modify uuid "$HOTSPOT_PROFILE_UUID" 802-11-wireless.channel "$HOTSPOT_CHANNEL" || true
+    fi
+
     for attempt in 1 2 3; do
         if [ "$attempt" -gt 1 ]; then
             echo "Retrying hotspot activation ($attempt/3)..."
             sleep 2
         fi
-        nmcli device disconnect "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
-        if nmcli device wifi hotspot ifname "$HOTSPOT_IFACE" ssid "$HOTSPOT_SSID" password "$HOTSPOT_PASSWORD"; then
-            HOTSPOT_ENABLED=1
-            break
+
+        if nmcli connection up uuid "$HOTSPOT_PROFILE_UUID" ifname "$HOTSPOT_IFACE" >/dev/null 2>&1; then
+            for _ in 1 2 3 4 5; do
+                if hotspot_postcondition_met "$HOTSPOT_IFACE"; then
+                    if command -v iw >/dev/null 2>&1; then
+                        iw dev "$HOTSPOT_IFACE" set power_save off || true
+                    fi
+                    echo "Hotspot enabled successfully at $HOTSPOT_IPV4_ADDRESS."
+                    return 0
+                fi
+                sleep 1
+            done
         fi
+
+        nmcli connection down uuid "$HOTSPOT_PROFILE_UUID" >/dev/null 2>&1 || true
+        nmcli device disconnect "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
     done
 
-    if [ "$HOTSPOT_ENABLED" -eq 1 ]; then
-        
-        
-        # Try finding the connection we just created (active on selected hotspot interface)
-        NEW_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep ":$HOTSPOT_IFACE" | cut -d: -f1 | head -n1)
+    echo "Hotspot activation did not reach the required AP/IP postcondition."
+    return 1
 
-        # Apply explicit AP profile settings for predictable behavior across NM versions.
-        PROFILE_CANDIDATES=()
-        if [ -n "$NEW_CONN" ]; then
-            PROFILE_CANDIDATES+=("$NEW_CONN")
-        fi
-        PROFILE_CANDIDATES+=("hotspot-ap" "Hotspot")
-        PROFILE_CONFIGURED=0
-
-        for conn in "${PROFILE_CANDIDATES[@]}"; do
-            if nmcli connection show "$conn" >/dev/null 2>&1; then
-                echo "Configuring hotspot profile: $conn"
-                nmcli connection modify "$conn" connection.autoconnect yes || true
-                # At boot, a saved client network must win over the fallback AP.
-                # Recovery activates this profile explicitly, so it does not need
-                # a higher autoconnect priority than the client profile.
-                nmcli connection modify "$conn" connection.autoconnect-priority "$HOTSPOT_AUTOCONNECT_PRIORITY" || true
-                if ! nmcli connection modify "$conn" 802-11-wireless.mode ap; then
-                    echo "Failed to configure AP mode on hotspot profile."
-                    return 1
-                fi
-                if ! nmcli connection modify "$conn" ipv4.method shared ipv4.addresses "$HOTSPOT_IPV4_CIDR"; then
-                    echo "Failed to configure fixed hotspot address $HOTSPOT_IPV4_CIDR."
-                    return 1
-                fi
-                nmcli connection modify "$conn" ipv6.method disabled || true
-                nmcli connection modify "$conn" wifi-sec.key-mgmt wpa-psk || true
-                nmcli connection modify "$conn" wifi-sec.psk "$HOTSPOT_PASSWORD" || true
-                nmcli connection modify "$conn" 802-11-wireless.powersave 2 || true
-                if [ -n "$HOTSPOT_BAND" ]; then
-                    nmcli connection modify "$conn" 802-11-wireless.band "$HOTSPOT_BAND" || true
-                fi
-                if [ -n "$HOTSPOT_CHANNEL" ]; then
-                    nmcli connection modify "$conn" 802-11-wireless.channel "$HOTSPOT_CHANNEL" || true
-                fi
-                if ! nmcli connection up "$conn" ifname "$HOTSPOT_IFACE" >/dev/null 2>&1; then
-                    echo "Failed to reactivate configured hotspot profile."
-                    return 1
-                fi
-                PROFILE_CONFIGURED=1
-                break
-            fi
-        done
-        if [ "$PROFILE_CONFIGURED" -ne 1 ]; then
-            echo "Could not identify the hotspot connection profile."
-            return 1
-        fi
-
-        # Extra safeguard: also disable kernel powersave flag for this device
-        if command -v iw >/dev/null 2>&1; then
-            iw dev "$HOTSPOT_IFACE" set power_save off || true
-        fi
-        
-        HOTSPOT_VERIFIED=0
-        for _ in 1 2 3 4 5; do
-            if hotspot_postcondition_met "$HOTSPOT_IFACE"; then
-                HOTSPOT_VERIFIED=1
-                break
-            fi
-            sleep 1
-        done
-        if [ "$HOTSPOT_VERIFIED" -ne 1 ]; then
-            echo "Hotspot activation did not reach the required AP/IP postcondition."
-            return 1
-        fi
-
-        echo "Hotspot enabled successfully at $HOTSPOT_IPV4_ADDRESS."
-    else
-        echo "Failed to enable hotspot."
-        return 1
-    fi
-
-    return 0
 }
 
 if [ "$FORCE_HOTSPOT" = true ]; then
