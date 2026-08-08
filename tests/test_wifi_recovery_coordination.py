@@ -112,6 +112,17 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         self.assertLess(stop_position, manager_position)
         self.assertIn('nmcli connection down uuid "$conn"', source[stop_position:manager_position])
 
+    def test_forced_hotspot_mode_disconnects_dedicated_client_interface(self):
+        source = self.read(WIFI_CONNECT)
+        forced_mode = source.index('if [ "$FORCE_HOTSPOT" = true ]; then', source.index("enable_hotspot()"))
+        hotspot_start = source.index("enable_hotspot", forced_mode)
+
+        self.assertIn(
+            'deactivate_client_on_interface "$CLIENT_IFACE"',
+            source[forced_mode:hotspot_start],
+        )
+        self.assertIn('nmcli device disconnect "$iface"', source)
+
     def test_package_installs_persistent_journal_configuration(self):
         workflow = self.read(REPO_ROOT / ".github" / "workflows" / "build-deb.yml")
         postinst = self.read(REPO_ROOT / "packaging" / "DEBIAN" / "postinst")

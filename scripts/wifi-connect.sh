@@ -163,6 +163,23 @@ deactivate_hotspot_on_interface() {
     done < <(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null)
 }
 
+deactivate_client_on_interface() {
+    local iface="$1"
+
+    echo "Disconnecting client Wi-Fi on $iface for hotspot-only mode."
+    while IFS=: read -r profile_uuid profile_type profile_iface; do
+        [ "$profile_type" = "802-11-wireless" ] || continue
+        [ "$profile_iface" = "$iface" ] || continue
+        if [ "$(nmcli -g 802-11-wireless.mode connection show uuid "$profile_uuid" 2>/dev/null || true)" != "ap" ]; then
+            nmcli connection down uuid "$profile_uuid" >/dev/null 2>&1 || true
+        fi
+    done < <(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null)
+
+    # Prevent NetworkManager from immediately auto-activating another client
+    # profile on this device. A later explicit connect re-enables the device.
+    nmcli device disconnect "$iface" >/dev/null 2>&1 || true
+}
+
 hotspot_postcondition_met() {
     local iface="$1"
     is_hotspot_active_on_interface "$iface" || return 1
@@ -475,6 +492,7 @@ enable_hotspot() {
 }
 
 if [ "$FORCE_HOTSPOT" = true ]; then
+    deactivate_client_on_interface "$CLIENT_IFACE"
     enable_hotspot
     exit $?
 fi
