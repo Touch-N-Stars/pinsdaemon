@@ -119,15 +119,23 @@ set_failures() {
 }
 
 is_hotspot_active() {
-    nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
-        | awk -F: -v iface="$HOTSPOT_IFACE" '$2=="802-11-wireless" && $3==iface {print $1}' \
-        | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
+    while IFS=: read -r profile_uuid profile_type profile_iface; do
+        [[ "$profile_type" == "802-11-wireless" && "$profile_iface" == "$HOTSPOT_IFACE" ]] || continue
+        if [[ "$(nmcli -g 802-11-wireless.mode connection show uuid "$profile_uuid" 2>/dev/null || true)" == "ap" ]]; then
+            return 0
+        fi
+    done < <(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null)
+    return 1
 }
 
 is_wifi_client_active() {
-    nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
-        | awk -F: -v iface="$CLIENT_IFACE" \
-            '$2=="802-11-wireless" && $3==iface && $1!="Hotspot" && $1!="hotspot-ap" && $1!~ /^pins-/ {found=1} END {exit !found}'
+    while IFS=: read -r profile_uuid profile_type profile_iface; do
+        [[ "$profile_type" == "802-11-wireless" && "$profile_iface" == "$CLIENT_IFACE" ]] || continue
+        if [[ "$(nmcli -g 802-11-wireless.mode connection show uuid "$profile_uuid" 2>/dev/null || true)" != "ap" ]]; then
+            return 0
+        fi
+    done < <(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null)
+    return 1
 }
 
 if is_hotspot_active; then
@@ -197,9 +205,10 @@ if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-
     log "Fallback hotspot enabled successfully on ${HOTSPOT_IFACE}"
     set_failures 0
 else
-    log "Failed to enable fallback hotspot on ${HOTSPOT_IFACE}; will retry"
-    # Keep the threshold reached so the next timer run retries immediately
-    # instead of waiting for another full failure-count cycle.
-    set_failures "$MAX_FAILURES"
+    log "Failed to enable fallback hotspot on ${HOTSPOT_IFACE}; backing off before retry"
+    # A failed NetworkManager activation can emit several device events and
+    # may leave dnsmasq/device teardown in progress. Rebuild the full failure
+    # window instead of hammering the radio on every timer tick.
+    set_failures 0
 fi
 exit 0

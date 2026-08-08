@@ -125,7 +125,44 @@ def connect_to_wifi(ssid, band=None, client_interface=DEFAULT_WIFI_INTERFACE, ho
         print(f"Exception during connection: {e}")
         return False
 
+def hotspot_is_ready(interface):
+    try:
+        active = subprocess.run(
+            ["nmcli", "-t", "-f", "UUID,TYPE,DEVICE", "connection", "show", "--active"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        for line in active.stdout.splitlines():
+            fields = line.split(":", 2)
+            if len(fields) != 3 or fields[1] != "802-11-wireless" or fields[2] != interface:
+                continue
+            mode = subprocess.run(
+                ["nmcli", "-g", "802-11-wireless.mode", "connection", "show", "uuid", fields[0]],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if mode.returncode != 0 or mode.stdout.strip() != "ap":
+                continue
+            addresses = subprocess.run(
+                ["nmcli", "-g", "IP4.ADDRESS", "device", "show", interface],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return addresses.returncode == 0 and any(
+                address.strip().startswith("10.42.0.1/")
+                for address in addresses.stdout.splitlines()
+            )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return False
+
 def start_hotspot(client_interface=DEFAULT_WIFI_INTERFACE, hotspot_interface=DEFAULT_WIFI_INTERFACE):
+    if hotspot_is_ready(hotspot_interface):
+        print(f"Fallback hotspot is already active on {hotspot_interface}.")
+        return
     print(f"Starting hotspot on {hotspot_interface} (client iface: {client_interface})...")
     try:
         subprocess.run(
