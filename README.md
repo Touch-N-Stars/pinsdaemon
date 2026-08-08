@@ -520,12 +520,19 @@ Download archive when status is `success`:
 
 The ZIP contains selected troubleshooting data such as:
 
-- `journalctl -u pins` and `journalctl -u sysupdate-api` logs
+- a versioned manifest with boot ID, collection timestamps, and duration
+- current and historical `pins`, `sysupdate-api`, NetworkManager, watchdog, dispatcher, Avahi, and kernel journals
 - local pinsdaemon daily log files from `/opt/pinsdaemon/logs` retained for 5 days, including daemon output, job output, and Wi-Fi recovery decisions
 - `lsusb`, `lsusb -t`, `usb-devices`
-- `dmesg` tail and USB-focused dmesg filters
-- `nmcli`, `ip`, `rfkill`, and `iw` outputs
+- `dmesg` tail plus USB- and network-focused driver filters
+- NetworkManager device/profile state without connection secrets
+- IPv4/IPv6 addresses, every routing table and rule, neighbors, DNS state, firewall rules, listening socket owners, and recovery-lock state
+- per-interface carrier/operational state, driver identity, counters, `ethtool` statistics, and Wi-Fi link information
+- process/resource summaries without command-line arguments, failed units, timers, package versions, and installed network-script hashes
 - basic system details (`uname`, `os-release`, `timedatectl`, service status)
+
+The collector deliberately excludes NetworkManager secrets, hotspot passwords,
+process command-line arguments, and the daemon API token.
 
 ### 13. Check Updates
 
