@@ -646,6 +646,11 @@ def _parse_nmcli_row(line: str) -> list[str]:
 
 
 def _is_hotspot_connection_name(name: str) -> bool:
+    # Transactional client profiles deliberately use the stable
+    # ``pins-client-<ssid hash>`` namespace.  Check it before the legacy
+    # hotspot prefix so active client connections are not reported as APs.
+    if name.startswith("pins-client-"):
+        return False
     return name in {"Hotspot", "hotspot-ap"} or name.startswith("pins-")
 
 
