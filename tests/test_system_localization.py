@@ -41,6 +41,23 @@ class LocalizationParsingTests(unittest.TestCase):
                 ("US", "United States"),
             ])
 
+    def test_keyboard_layout_options_include_human_readable_names(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rules = Path(temp_dir) / "base.lst"
+            rules.write_text(
+                "! model\n  pc105 Generic\n! layout\n"
+                "  us English (US)\n  gb English (UK)\n  de German\n"
+                "! variant\n  intl us: English (US, intl.)\n",
+                encoding="utf-8",
+            )
+
+            result = main._read_keyboard_layout_options(str(rules), {"us", "gb"})
+
+            self.assertEqual(
+                [(item.code, item.name) for item in result],
+                [("gb", "English (UK)"), ("us", "English (US)")],
+            )
+
 
 class LocalizationApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_reports_values_from_the_system(self):

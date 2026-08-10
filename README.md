@@ -496,8 +496,11 @@ Read the values currently configured on the host:
 Read the valid choices discovered from the installed operating system:
 
 - **URL**: `GET /system/localization/options`
-- **Response**: `locales`, `wifiCountries`, `timezones`, and `keyboardLayouts`
-  arrays. Wi-Fi countries contain `{ "code", "name" }` objects.
+- **Response**: `locales`, `wifiCountries`, `timezones`, `keyboardLayouts`, and
+  `keyboardLayoutOptions` arrays. Wi-Fi countries and named keyboard layouts
+  contain `{ "code", "name" }` objects. Keyboard names come from the host XKB
+  rules, so clients can find codes such as `us` and `gb` by searching for
+  `English`.
 
 Apply one or more settings asynchronously:
 

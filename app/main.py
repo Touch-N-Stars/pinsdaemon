@@ -312,11 +312,17 @@ class WifiCountryOption(BaseModel):
     name: str
 
 
+class KeyboardLayoutOption(BaseModel):
+    code: str
+    name: str
+
+
 class SystemLocalizationOptionsResponse(BaseModel):
     locales: List[str] = Field(default_factory=list)
     wifiCountries: List[WifiCountryOption] = Field(default_factory=list)
     timezones: List[str] = Field(default_factory=list)
     keyboardLayouts: List[str] = Field(default_factory=list)
+    keyboardLayoutOptions: List[KeyboardLayoutOption] = Field(default_factory=list)
 
 
 class SystemLocalizationUpdateRequest(BaseModel):
@@ -1011,6 +1017,7 @@ SUPPORTED_LOCALES_PATH = os.getenv("SUPPORTED_LOCALES_PATH", "/usr/share/i18n/SU
 ISO3166_PATH = os.getenv("ISO3166_PATH", "/usr/share/zoneinfo/iso3166.tab")
 DEFAULT_LOCALE_PATH = os.getenv("DEFAULT_LOCALE_PATH", "/etc/default/locale")
 DEFAULT_KEYBOARD_PATH = os.getenv("DEFAULT_KEYBOARD_PATH", "/etc/default/keyboard")
+XKB_RULES_LIST_PATH = os.getenv("XKB_RULES_LIST_PATH", "/usr/share/X11/xkb/rules/base.lst")
 
 
 def _read_shell_assignment(path: str, key: str) -> Optional[str]:
@@ -1060,6 +1067,39 @@ def _read_wifi_country_options(path: str = ISO3166_PATH) -> list[WifiCountryOpti
     return sorted(countries, key=lambda country: country.name.casefold())
 
 
+def _read_keyboard_layout_options(
+    path: str = XKB_RULES_LIST_PATH,
+    allowed_codes: Optional[set[str]] = None,
+) -> list[KeyboardLayoutOption]:
+    layouts: dict[str, str] = {}
+    reading_layouts = False
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                stripped = raw_line.strip()
+                if stripped.startswith("!"):
+                    if stripped == "! layout":
+                        reading_layouts = True
+                        continue
+                    if reading_layouts:
+                        break
+                    continue
+                if not reading_layouts or not stripped:
+                    continue
+                fields = stripped.split(None, 1)
+                if len(fields) != 2:
+                    continue
+                code, name = fields
+                if allowed_codes is None or code in allowed_codes:
+                    layouts.setdefault(code, name.strip())
+    except OSError:
+        return []
+    return sorted(
+        (KeyboardLayoutOption(code=code, name=name) for code, name in layouts.items()),
+        key=lambda layout: (layout.name.casefold(), layout.code.casefold()),
+    )
+
+
 async def _capture_localization_command(*command: str, timeout: float = 10.0) -> Optional[str]:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -1093,11 +1133,20 @@ async def _read_localization_options() -> SystemLocalizationOptionsResponse:
         _capture_localization_command("timedatectl", "list-timezones", timeout=20.0),
         _capture_localization_command("localectl", "list-x11-keymap-layouts", timeout=20.0),
     )
+    keyboard_layouts = sorted(set((keyboard_output or "").splitlines()), key=str.casefold)
+    named_keyboard_layouts = _read_keyboard_layout_options(allowed_codes=set(keyboard_layouts))
+    named_codes = {layout.code for layout in named_keyboard_layouts}
+    keyboard_layout_options = named_keyboard_layouts + [
+        KeyboardLayoutOption(code=code, name=code)
+        for code in keyboard_layouts
+        if code not in named_codes
+    ]
     return SystemLocalizationOptionsResponse(
         locales=_read_supported_locales(),
         wifiCountries=_read_wifi_country_options(),
         timezones=sorted(set((timezone_output or "").splitlines()), key=str.casefold),
-        keyboardLayouts=sorted(set((keyboard_output or "").splitlines()), key=str.casefold),
+        keyboardLayouts=keyboard_layouts,
+        keyboardLayoutOptions=keyboard_layout_options,
     )
 
 
