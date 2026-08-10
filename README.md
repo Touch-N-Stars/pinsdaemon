@@ -1,6 +1,6 @@
 ﻿# PINS Daemon (System Management API)
 
-A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expose system management capabilities via a REST API. It handles system updates, firmware installation, Samba share management, PHD2 service control, Wi-Fi configuration, and system telemetry/time operations.
+A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expose system management capabilities via a REST API. It handles system updates, firmware installation, Samba share management, PHD2 service control, Wi-Fi configuration, system localization, and system telemetry/time operations.
 
 ## Features
 
@@ -13,6 +13,8 @@ A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expo
 - **Wi-Fi Runtime Recovery**: Retries the configured client interface when connectivity
   is lost and falls back to the device hotspot after repeated failures.
 - **System Utilities**: Read Pi temperature, read system time, and set system time.
+- **System Localization**: Read and configure the locale, Wi-Fi regulatory country,
+  timezone, and X11 keyboard layout using the choices supported by the host.
 - **Secure Architecture**:
   - Runs as a restricted user (`sysupdate-api`).
   - No shell injection: Commands are hard-coded or strictly parameterized.
@@ -455,7 +457,7 @@ Alias endpoint for the same update behavior:
   }
   ```
 
-### 12. System Time
+### 13. System Time
 
 - **URL**: `GET /system/time`
 - **Response**:
@@ -475,6 +477,37 @@ Alias endpoint for the same update behavior:
   }
   ```
 - **Response**: `JobResponse` object.
+
+### 14. System Localization
+
+Read the values currently configured on the host:
+
+- **URL**: `GET /system/localization`
+- **Response**:
+  ```json
+  {
+    "locale": "en_GB.UTF-8",
+    "wifiCountry": "DE",
+    "timezone": "Europe/Berlin",
+    "keyboardLayout": "de"
+  }
+  ```
+
+Read the valid choices discovered from the installed operating system:
+
+- **URL**: `GET /system/localization/options`
+- **Response**: `locales`, `wifiCountries`, `timezones`, and `keyboardLayouts`
+  arrays. Wi-Fi countries contain `{ "code", "name" }` objects.
+
+Apply one or more settings asynchronously:
+
+- **URL**: `PUT /system/localization`
+- **Body**: Any non-empty subset of the four fields returned by the status endpoint.
+- **Response**: `JobResponse` object. Poll `GET /jobs/{jobId}` for completion.
+
+The daemon validates every requested value against the host-provided option lists
+before starting the privileged job. The installer grants only the packaged
+`manage-localization.sh` command, which uses `raspi-config` and `timedatectl`.
 
 ### Diagnostics Archive
 
@@ -569,7 +602,7 @@ The ZIP contains selected troubleshooting data such as:
 The collector deliberately excludes NetworkManager secrets, hotspot passwords,
 process command-line arguments, and the daemon API token.
 
-### 13. Check Updates
+### 15. Check Updates
 
 Check whether updates are available for a whitelist of relevant packages.
 The daemon reads installed versions locally and compares them against the configured APT Packages index.
@@ -616,7 +649,7 @@ accept:
 Mutating operations return a `JobResponse`. Protected core packages and names
 outside the daemon allowlist cannot be removed through these endpoints.
 
-### 14. Indi3rdparty Packages
+### 16. Indi3rdparty Packages
 
 List available packages from the latest GitHub release of:
 `https://github.com/acocalypso/indi3rdparty/releases/latest`
@@ -705,7 +738,7 @@ Edit one registry entry by driver name. You can rename it (`Name`), relabel (`La
   - `INDI_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-indi-package.sh`)
   - `INDI_3RDPARTY_JSON_PATH` (default: `/home/pi/Documents/INDI/3rdparty.json`)
 
-### 15. ASTAP Star Databases
+### 17. ASTAP Star Databases
 
 List installable ASTAP star databases for Raspberry Pi 64-bit.
 Supported selections: `D50`, `D05`, `G05`, `W08`.
@@ -748,7 +781,7 @@ Install one ASTAP star database.
   - `ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-astap-star-database.sh`)
   - `ASTAP_STAR_DATABASE_STATE_FILE` (default: `/opt/pinsdaemon/astap-star-databases.json`)
 
-### 16. Job Status
+### 18. Job Status
 
 Check the status of a background job.
 
@@ -760,7 +793,7 @@ job, whichever started later. General runtime jobs and their captured logs are
 held in memory and do not survive a daemon restart; the last upgrade job is the
 documented persistence exception.
 
-### 17. Job Logs (WebSocket)
+### 19. Job Logs (WebSocket)
 
 Stream live logs from a running job.
 

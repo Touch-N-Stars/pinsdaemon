@@ -14,6 +14,7 @@ Environment="UPDATE_SCRIPT_PATH=/usr/local/bin/system-upgrade.sh"
 Environment="SAMBA_SCRIPT_PATH=/usr/local/bin/manage-samba.sh"
 Environment="WIFI_SCAN_SCRIPT_PATH=/usr/local/bin/wifi-scan.py"
 Environment="WIFI_CONNECT_SCRIPT_PATH=/usr/local/bin/wifi-connect.sh"
+Environment="LOCALIZATION_SCRIPT_PATH=/usr/local/bin/manage-localization.sh"
 # Run uvicorn using the virtual environment
 ExecStart=/opt/pinsdaemon/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always

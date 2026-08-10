@@ -59,6 +59,7 @@ jobs:
         cp scripts/ensure-required-packages.sh build/usr/local/bin/
         cp scripts/manage-plugin.sh build/usr/local/bin/
         cp scripts/manage-samba.sh build/usr/local/bin/
+        cp scripts/manage-localization.sh build/usr/local/bin/
         cp scripts/pins-rig-name build/usr/local/bin/
         cp scripts/wifi-connect.sh build/usr/local/bin/
         cp scripts/pins-wifi-profile.py build/usr/local/bin/

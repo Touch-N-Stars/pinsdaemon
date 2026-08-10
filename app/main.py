@@ -68,6 +68,9 @@ if not os.path.exists(DEFAULT_WIFI_AUTOMANAGE_SCRIPT):
 
 WIFI_AUTOMANAGE_SCRIPT_PATH = os.getenv("WIFI_AUTOMANAGE_SCRIPT_PATH", DEFAULT_WIFI_AUTOMANAGE_SCRIPT)
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
+LOCALIZATION_SCRIPT_PATH = os.getenv(
+    "LOCALIZATION_SCRIPT_PATH", "/usr/local/bin/manage-localization.sh"
+)
 FIRMWARE_INSTALL_SCRIPT_PATH = os.getenv("FIRMWARE_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-firmware.sh")
 INDI_INSTALL_SCRIPT_PATH = os.getenv("INDI_INSTALL_SCRIPT_PATH", "/usr/local/bin/install-indi-package.sh")
 DEFAULT_ASTAP_STAR_DATABASE_INSTALL_SCRIPT = "/usr/local/bin/install-astap-star-database.sh"
@@ -295,6 +298,34 @@ class WifiInterfacesRequest(BaseModel):
 class WifiInterfacesResponse(BaseModel):
     client_interface: str
     hotspot_interface: str
+
+
+class SystemLocalizationStatusResponse(BaseModel):
+    locale: Optional[str] = None
+    wifiCountry: Optional[str] = None
+    timezone: Optional[str] = None
+    keyboardLayout: Optional[str] = None
+
+
+class WifiCountryOption(BaseModel):
+    code: str
+    name: str
+
+
+class SystemLocalizationOptionsResponse(BaseModel):
+    locales: List[str] = Field(default_factory=list)
+    wifiCountries: List[WifiCountryOption] = Field(default_factory=list)
+    timezones: List[str] = Field(default_factory=list)
+    keyboardLayouts: List[str] = Field(default_factory=list)
+
+
+class SystemLocalizationUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    locale: Optional[str] = None
+    wifiCountry: Optional[str] = None
+    timezone: Optional[str] = None
+    keyboardLayout: Optional[str] = None
 
 class HotspotPasswordRequest(BaseModel):
     password: str
@@ -974,6 +1005,101 @@ async def is_hotspot_active_on_interface(interface: str) -> bool:
         return False
 
     return False
+
+
+SUPPORTED_LOCALES_PATH = os.getenv("SUPPORTED_LOCALES_PATH", "/usr/share/i18n/SUPPORTED")
+ISO3166_PATH = os.getenv("ISO3166_PATH", "/usr/share/zoneinfo/iso3166.tab")
+DEFAULT_LOCALE_PATH = os.getenv("DEFAULT_LOCALE_PATH", "/etc/default/locale")
+DEFAULT_KEYBOARD_PATH = os.getenv("DEFAULT_KEYBOARD_PATH", "/etc/default/keyboard")
+
+
+def _read_shell_assignment(path: str, key: str) -> Optional[str]:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                if name.strip() == key:
+                    return value.strip().strip('"\'') or None
+    except OSError:
+        return None
+    return None
+
+
+def _read_supported_locales(path: str = SUPPORTED_LOCALES_PATH) -> list[str]:
+    locales: set[str] = set()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                fields = line.split()
+                if len(fields) >= 2 and fields[1].upper() == "UTF-8":
+                    locales.add(fields[0])
+    except OSError:
+        return []
+    return sorted(locales, key=str.casefold)
+
+
+def _read_wifi_country_options(path: str = ISO3166_PATH) -> list[WifiCountryOption]:
+    countries: list[WifiCountryOption] = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                fields = line.split("\t", 1)
+                if len(fields) == 2 and re.fullmatch(r"[A-Z]{2}", fields[0]):
+                    countries.append(WifiCountryOption(code=fields[0], name=fields[1].strip()))
+    except OSError:
+        return []
+    return sorted(countries, key=lambda country: country.name.casefold())
+
+
+async def _capture_localization_command(*command: str, timeout: float = 10.0) -> Optional[str]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    if process.returncode != 0:
+        return None
+    return stdout.decode(errors="replace").strip() or None
+
+
+async def _read_system_localization() -> SystemLocalizationStatusResponse:
+    timezone_value, wifi_country = await asyncio.gather(
+        _capture_localization_command("timedatectl", "show", "--property=Timezone", "--value"),
+        _capture_localization_command("raspi-config", "nonint", "get_wifi_country"),
+    )
+    return SystemLocalizationStatusResponse(
+        locale=_read_shell_assignment(DEFAULT_LOCALE_PATH, "LANG"),
+        wifiCountry=wifi_country,
+        timezone=timezone_value,
+        keyboardLayout=_read_shell_assignment(DEFAULT_KEYBOARD_PATH, "XKBLAYOUT"),
+    )
+
+
+async def _read_localization_options() -> SystemLocalizationOptionsResponse:
+    timezone_output, keyboard_output = await asyncio.gather(
+        _capture_localization_command("timedatectl", "list-timezones", timeout=20.0),
+        _capture_localization_command("localectl", "list-x11-keymap-layouts", timeout=20.0),
+    )
+    return SystemLocalizationOptionsResponse(
+        locales=_read_supported_locales(),
+        wifiCountries=_read_wifi_country_options(),
+        timezones=sorted(set((timezone_output or "").splitlines()), key=str.casefold),
+        keyboardLayouts=sorted(set((keyboard_output or "").splitlines()), key=str.casefold),
+    )
+
 
 _TIMEZONE_NAME_RE = re.compile(r"^[A-Za-z0-9._+\-/]+$")
 
@@ -2652,6 +2778,86 @@ async def get_wifi_status():
 class SystemTimeResponse(BaseModel):
     timestamp: float
     iso: str
+
+
+@app.get(
+    "/system/localization",
+    response_model=SystemLocalizationStatusResponse,
+    dependencies=[Depends(verify_token)],
+)
+async def get_system_localization():
+    return await _read_system_localization()
+
+
+@app.get(
+    "/system/localization/options",
+    response_model=SystemLocalizationOptionsResponse,
+    dependencies=[Depends(verify_token)],
+)
+async def get_system_localization_options():
+    return await _read_localization_options()
+
+
+@app.put(
+    "/system/localization",
+    response_model=JobResponse,
+    dependencies=[Depends(verify_token)],
+)
+async def update_system_localization(request: SystemLocalizationUpdateRequest):
+    requested = {
+        key: value.strip()
+        for key, value in request.model_dump(exclude_none=True).items()
+        if isinstance(value, str) and value.strip()
+    }
+    if not requested:
+        raise HTTPException(status_code=400, detail="At least one localization value is required")
+
+    options = await _read_localization_options()
+    allowed_locales = set(options.locales)
+    allowed_countries = {country.code for country in options.wifiCountries}
+    allowed_timezones = set(options.timezones)
+    allowed_keyboards = set(options.keyboardLayouts)
+
+    if "locale" in requested and requested["locale"] not in allowed_locales:
+        raise HTTPException(status_code=400, detail=f"Unsupported locale: {requested['locale']}")
+    if "wifiCountry" in requested:
+        requested["wifiCountry"] = requested["wifiCountry"].upper()
+        if requested["wifiCountry"] not in allowed_countries:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported Wi-Fi country: {requested['wifiCountry']}",
+            )
+    if "timezone" in requested:
+        requested["timezone"] = _validate_timezone_name(requested["timezone"])
+        if allowed_timezones and requested["timezone"] not in allowed_timezones:
+            raise HTTPException(status_code=400, detail=f"Unsupported timezone: {requested['timezone']}")
+    if "keyboardLayout" in requested and requested["keyboardLayout"] not in allowed_keyboards:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported keyboard layout: {requested['keyboardLayout']}",
+        )
+
+    if not os.path.exists(LOCALIZATION_SCRIPT_PATH):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Localization management script not found at {LOCALIZATION_SCRIPT_PATH}",
+        )
+
+    command = ["sudo", "-n", LOCALIZATION_SCRIPT_PATH]
+    for field_name, flag in (
+        ("locale", "--locale"),
+        ("wifiCountry", "--wifi-country"),
+        ("timezone", "--timezone"),
+        ("keyboardLayout", "--keyboard-layout"),
+    ):
+        if field_name in requested:
+            command.extend([flag, requested[field_name]])
+
+    job_id = await job_manager.start_job(command)
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Localization job was not created")
+    return _job_response_from_runtime_job(job)
 
 
 @app.get("/system/temperature", response_model=PiTemperatureResponse, dependencies=[Depends(verify_token)])

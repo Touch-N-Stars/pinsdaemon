@@ -60,6 +60,11 @@ if [ -f "/usr/local/bin/manage-samba.sh" ]; then
     chmod 755 /usr/local/bin/manage-samba.sh
 fi
 
+if [ -f "/usr/local/bin/manage-localization.sh" ]; then
+    chown root:root /usr/local/bin/manage-localization.sh
+    chmod 755 /usr/local/bin/manage-localization.sh
+fi
+
 if [ -f "/usr/local/bin/wifi-connect.sh" ]; then
     chown root:root /usr/local/bin/wifi-connect.sh
     chmod 755 /usr/local/bin/wifi-connect.sh
