@@ -4,26 +4,21 @@ set -euo pipefail
 IFACE="${1:-}"
 ACTION="${2:-}"
 
-# Run only for relevant lifecycle changes where recovery decisions make sense.
-case "$ACTION" in
-    up|down|dhcp4-change|connectivity-change|reapply)
-        ;;
-    *)
-        exit 0
-        ;;
-esac
+# The timer watchdog is the single owner of automatic Wi-Fi recovery. The
+# dispatcher only observes a successful manual client activation so a user who
+# connects through NetworkManager/VNC can leave explicit hotspot-only mode.
+# It must never launch nmcli recovery commands from NetworkManager callbacks:
+# those commands produce more callbacks and can create an unbounded event loop.
+if [[ "$ACTION" != "up" ]]; then
+    exit 0
+fi
 
 COORDINATION_LOCK_FILE="/run/pins-wifi-coordination.lock"
-STATE_FILE="/run/pins-wifi-recovery.failures"
 WIFI_CONFIG_FILE="/opt/pinsdaemon/app/wifi_config.json"
-WIFI_CONNECT_SCRIPT="/usr/local/bin/wifi-connect.sh"
 LOG_TAG="pins-wifi-recovery"
 DEFAULT_WIFI_INTERFACE="wlan0"
 LOCAL_LOG_DIR="${PINSDAEMON_LOG_DIR:-/opt/pinsdaemon/logs}"
 LOCAL_LOG_RETENTION_DAYS="${PINSDAEMON_LOG_RETENTION_DAYS:-5}"
-
-MAX_RETRIES="${PINS_WIFI_RECOVERY_MAX_RETRIES:-3}"
-BACKOFF_SECONDS="${PINS_WIFI_RECOVERY_BACKOFF_SECONDS:-5}"
 
 prune_local_logs() {
     mkdir -p "$LOCAL_LOG_DIR" 2>/dev/null || return 0
@@ -37,7 +32,7 @@ log() {
     printf "%s %s\n" "$(date --iso-8601=seconds)" "$message" >>"$LOCAL_LOG_DIR/wifi-recovery-$(date +%F).log" 2>/dev/null || true
 }
 
-read_configured_interfaces() {
+read_configured_state() {
     python3 - "$WIFI_CONFIG_FILE" "$DEFAULT_WIFI_INTERFACE" <<'PY'
 import json
 import os
@@ -54,27 +49,20 @@ desired_mode = "auto"
 
 if os.path.exists(path):
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(path, "r", encoding="utf-8") as source:
+            data = json.load(source)
         if isinstance(data, dict):
             candidate_client = data.get("client_interface")
             candidate_hotspot = data.get("hotspot_interface")
             candidate_mode = data.get("desired_mode")
-            if isinstance(candidate_client, str):
-                candidate_client = candidate_client.strip()
-                if valid.fullmatch(candidate_client):
-                    client = candidate_client
-            if isinstance(candidate_hotspot, str):
-                candidate_hotspot = candidate_hotspot.strip()
-                if valid.fullmatch(candidate_hotspot):
-                    hotspot = candidate_hotspot
+            if isinstance(candidate_client, str) and valid.fullmatch(candidate_client.strip()):
+                client = candidate_client.strip()
+            if isinstance(candidate_hotspot, str) and valid.fullmatch(candidate_hotspot.strip()):
+                hotspot = candidate_hotspot.strip()
             if isinstance(candidate_mode, str) and candidate_mode.strip().lower() in {"auto", "hotspot"}:
                 desired_mode = candidate_mode.strip().lower()
     except Exception:
         pass
-
-if not hotspot:
-    hotspot = client
 
 print(client)
 print(hotspot)
@@ -82,96 +70,34 @@ print(desired_mode)
 PY
 }
 
-mapfile -t IFACES < <(read_configured_interfaces)
-CLIENT_IFACE="${IFACES[0]:-$DEFAULT_WIFI_INTERFACE}"
-HOTSPOT_IFACE="${IFACES[1]:-$CLIENT_IFACE}"
-DESIRED_MODE="${IFACES[2]:-auto}"
+mapfile -t STATE < <(read_configured_state)
+CLIENT_IFACE="${STATE[0]:-$DEFAULT_WIFI_INTERFACE}"
+HOTSPOT_IFACE="${STATE[1]:-$CLIENT_IFACE}"
+DESIRED_MODE="${STATE[2]:-auto}"
 
-if [[ "$IFACE" != "$CLIENT_IFACE" && "$IFACE" != "$HOTSPOT_IFACE" ]]; then
+if [[ "$IFACE" != "$CLIENT_IFACE" || "$CLIENT_IFACE" != "$HOTSPOT_IFACE" || "$DESIRED_MODE" != "hotspot" ]]; then
     exit 0
 fi
 
 if ! command -v flock >/dev/null 2>&1; then
-    log "Cannot run Wi-Fi recovery safely: flock is unavailable"
+    log "Cannot persist manual Wi-Fi mode hand-off safely: flock is unavailable"
     exit 0
 fi
 
-# Serialize every NetworkManager decision with the timer watchdog and manual
-# wifi-connect operations. Unlike a directory sentinel, flock is atomic and is
-# released by the kernel even if this dispatcher process is killed.
 exec 9>"$COORDINATION_LOCK_FILE"
 if ! flock -n 9; then
     exit 0
 fi
 
-is_hotspot_active() {
-    nmcli -t -f NAME,TYPE,DEVICE connection show --active 2>/dev/null \
-        | awk -F: -v iface="$HOTSPOT_IFACE" '$2=="802-11-wireless" && $3==iface {print $1}' \
-        | grep -E '^(Hotspot|hotspot-ap|pins-)' >/dev/null 2>&1
-}
-
-is_wifi_client_connected() {
-    nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
-        | grep -qE "^${CLIENT_IFACE}:wifi:connected$"
-}
-
-read_autoconnect_config() {
-    python3 - "$WIFI_CONFIG_FILE" <<'PY'
-import json
-import os
-import sys
-
-path = sys.argv[1]
-
-if not os.path.exists(path):
-    print("0")
-    print("")
-    print("")
-    raise SystemExit(0)
-
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-except Exception:
-    print("0")
-    print("")
-    print("")
-    raise SystemExit(0)
-
-auto_connect = bool(data.get("auto_connect", False))
-ssid = data.get("ssid") if isinstance(data.get("ssid"), str) else ""
-band = data.get("band") if isinstance(data.get("band"), str) else ""
-
-print("1" if auto_connect and ssid.strip() else "0")
-print(ssid.strip())
-print(band.strip())
-PY
-}
-
-normalize_band() {
-    case "$1" in
-        2.4GHz|bg)
-            echo "bg"
-            ;;
-        5GHz|a)
-            echo "a"
-            ;;
-        *)
-            echo ""
-            ;;
-    esac
-}
-
-get_failures() {
-    if [[ -f "$STATE_FILE" ]]; then
-        cat "$STATE_FILE" 2>/dev/null || echo "0"
-    else
-        echo "0"
-    fi
-}
-
-set_failures() {
-    printf "%s\n" "$1" > "$STATE_FILE"
+is_wifi_client_active() {
+    while IFS=: read -r profile_uuid profile_type profile_iface; do
+        [[ "$profile_type" == "802-11-wireless" && "$profile_iface" == "$CLIENT_IFACE" ]] || continue
+        profile_mode="$(nmcli -g 802-11-wireless.mode connection show uuid "$profile_uuid" 2>/dev/null || true)"
+        if [[ "$profile_mode" != "ap" ]]; then
+            return 0
+        fi
+    done < <(nmcli -t -f UUID,TYPE,DEVICE connection show --active 2>/dev/null)
+    return 1
 }
 
 persist_auto_mode() {
@@ -203,97 +129,12 @@ finally:
 PY
 }
 
-if is_hotspot_active; then
-    FAILURES="$(get_failures)"
-    if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
-        log "Fallback hotspot is active on ${HOTSPOT_IFACE}; recovery confirmed"
-    fi
-    set_failures 0
-    exit 0
-fi
-
-# Activating a normal client profile from the desktop/VNC is an explicit user
-# request to leave forced field-hotspot mode. Without this hand-off, the next
-# watchdog tick would recreate the AP and disconnect the client on a single
-# radio.
-if [[ "$ACTION" == "up" && "$DESIRED_MODE" == "hotspot" && "$CLIENT_IFACE" == "$HOTSPOT_IFACE" ]] \
-    && is_wifi_client_connected; then
+if is_wifi_client_active; then
     if persist_auto_mode; then
-        DESIRED_MODE="auto"
         log "Wi-Fi client activated manually on ${CLIENT_IFACE}; returning network mode to auto"
     else
         log "Failed to persist automatic mode after manual Wi-Fi client activation"
     fi
 fi
 
-if [[ "$DESIRED_MODE" == "hotspot" ]]; then
-    log "Persistent hotspot mode requested; enabling hotspot on ${HOTSPOT_IFACE}"
-    if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1; then
-        log "Persistent hotspot enabled successfully on ${HOTSPOT_IFACE}"
-        set_failures 0
-    else
-        log "Failed to enable persistent hotspot on ${HOTSPOT_IFACE}; will retry"
-        set_failures "$MAX_RETRIES"
-    fi
-    exit 0
-fi
-
-if is_wifi_client_connected; then
-    FAILURES="$(get_failures)"
-    if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
-        log "Wi-Fi client connectivity restored on ${CLIENT_IFACE} after ${FAILURES} reconnect attempt(s)"
-    fi
-    set_failures 0
-    exit 0
-fi
-
-mapfile -t CFG < <(read_autoconnect_config)
-AUTOCONNECT_ENABLED="${CFG[0]:-0}"
-TARGET_SSID="${CFG[1]:-}"
-TARGET_BAND="$(normalize_band "${CFG[2]:-}")"
-
-if [[ "$AUTOCONNECT_ENABLED" != "1" ]]; then
-    log "Wi-Fi disconnected on ${IFACE}; auto-connect disabled; enabling fallback hotspot on ${HOTSPOT_IFACE}"
-    if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1; then
-        log "Fallback hotspot enabled successfully on ${HOTSPOT_IFACE}"
-        set_failures 0
-    else
-        log "Failed to enable fallback hotspot on ${HOTSPOT_IFACE}; will retry on the next recovery event"
-    fi
-    exit 0
-fi
-
-FAILURES="$(get_failures)"
-if ! [[ "$FAILURES" =~ ^[0-9]+$ ]]; then
-    FAILURES=0
-fi
-FAILURES=$((FAILURES + 1))
-set_failures "$FAILURES"
-
-if [[ "$FAILURES" -le "$MAX_RETRIES" ]]; then
-    log "Wi-Fi disconnected; reconnect attempt ${FAILURES}/${MAX_RETRIES} to SSID '${TARGET_SSID}'"
-
-    if [[ -n "$TARGET_BAND" ]]; then
-        nmcli connection modify "$TARGET_SSID" 802-11-wireless.band "$TARGET_BAND" >/dev/null 2>&1 || true
-    fi
-
-    nmcli connection up "$TARGET_SSID" ifname "$CLIENT_IFACE" >/dev/null 2>&1 || true
-    sleep "$BACKOFF_SECONDS"
-
-    if is_wifi_client_connected; then
-        log "Wi-Fi reconnect succeeded"
-        set_failures 0
-    fi
-
-    exit 0
-fi
-
-log "Wi-Fi reconnect failed after ${MAX_RETRIES} attempts; enabling fallback hotspot on ${HOTSPOT_IFACE}"
-if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1; then
-    log "Fallback hotspot enabled successfully on ${HOTSPOT_IFACE}"
-    set_failures 0
-else
-    log "Failed to enable fallback hotspot on ${HOTSPOT_IFACE}; will retry on the next recovery event"
-    set_failures "$MAX_RETRIES"
-fi
 exit 0

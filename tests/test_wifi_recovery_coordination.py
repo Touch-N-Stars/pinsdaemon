@@ -7,6 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WATCHDOG = REPO_ROOT / "scripts" / "pins-wifi-watchdog.sh"
 DISPATCHER = REPO_ROOT / "scripts" / "90-pins-wifi-recovery"
 WIFI_CONNECT = REPO_ROOT / "scripts" / "wifi-connect.sh"
+COLLECT_DIAGNOSTICS = REPO_ROOT / "scripts" / "collect-diagnostics.sh"
 
 
 class WifiRecoveryCoordinationTests(unittest.TestCase):
@@ -34,16 +35,20 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         )
 
     def test_recovery_callers_keep_lock_held_during_wifi_connect(self):
-        for path in (WATCHDOG, DISPATCHER):
-            source = self.read(path)
-            calls = [
-                line
-                for line in source.splitlines()
-                if '"$WIFI_CONNECT_SCRIPT" --hotspot' in line
-            ]
-            self.assertTrue(calls, f"{path.name} must invoke hotspot fallback")
-            for call in calls:
-                self.assertIn("PINS_WIFI_COORDINATION_LOCK_HELD=1", call)
+        source = self.read(WATCHDOG)
+        calls = [
+            line
+            for line in source.splitlines()
+            if '"$WIFI_CONNECT_SCRIPT" --hotspot' in line
+        ]
+        self.assertTrue(calls, "watchdog must invoke hotspot fallback")
+        for call in calls:
+            self.assertIn("PINS_WIFI_COORDINATION_LOCK_HELD=1", call)
+
+        dispatcher = self.read(DISPATCHER)
+        self.assertNotIn("WIFI_CONNECT_SCRIPT", dispatcher)
+        self.assertNotIn("nmcli connection up", dispatcher)
+        self.assertNotIn("nmcli device disconnect", dispatcher)
 
         wifi_connect = self.read(WIFI_CONNECT)
         self.assertIn('exec 9>"$COORDINATION_LOCK_FILE"', wifi_connect)
@@ -51,27 +56,22 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
             'flock -w "$COORDINATION_LOCK_WAIT_SECONDS" 9', wifi_connect
         )
 
-    def test_watchdog_logs_outcomes_and_retries_failed_hotspot_immediately(self):
+    def test_watchdog_logs_outcomes_and_backs_off_after_failed_hotspot(self):
         source = self.read(WATCHDOG)
         self.assertIn("Gateway connectivity restored", source)
         self.assertIn("Fallback hotspot enabled successfully", source)
         self.assertIn("Failed to enable fallback hotspot", source)
-        self.assertIn('set_failures "$MAX_FAILURES"', source)
+        self.assertIn("backing off before retry", source)
+        self.assertIn("set_failures 0", source)
         self.assertIn('DESIRED_MODE="${IFACES[2]:-auto}"', source)
         self.assertIn('if [[ "$DESIRED_MODE" == "hotspot" ]]', source)
 
-    def test_dispatcher_logs_outcomes_and_targets_configured_interface(self):
+    def test_dispatcher_only_observes_manual_single_radio_client_activation(self):
         source = self.read(DISPATCHER)
-        self.assertIn("Wi-Fi client connectivity restored", source)
-        self.assertIn("Fallback hotspot enabled successfully", source)
-        self.assertIn("Failed to enable fallback hotspot", source)
-        self.assertIn(
-            'nmcli connection up "$TARGET_SSID" ifname "$CLIENT_IFACE"',
-            source,
-        )
-        self.assertIn('DESIRED_MODE="${IFACES[2]:-auto}"', source)
-        self.assertIn('if [[ "$DESIRED_MODE" == "hotspot" ]]', source)
-        self.assertRegex(source, re.compile(r"\bup\|down\|dhcp4-change"))
+        self.assertIn('if [[ "$ACTION" != "up" ]]', source)
+        self.assertIn('DESIRED_MODE="${STATE[2]:-auto}"', source)
+        self.assertIn('"$CLIENT_IFACE" != "$HOTSPOT_IFACE"', source)
+        self.assertIn("802-11-wireless.mode", source)
         self.assertIn("persist_auto_mode", source)
         self.assertIn("returning network mode to auto", source)
 
@@ -84,10 +84,24 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
 
     def test_hotspot_has_fixed_address_and_activation_postcondition(self):
         source = self.read(WIFI_CONNECT)
+        postinst = self.read(REPO_ROOT / "packaging" / "DEBIAN" / "postinst")
         self.assertIn("10.42.0.1/24", source)
         self.assertIn("hotspot_postcondition_met", source)
-        self.assertIn('ipv4.method shared ipv4.addresses "$HOTSPOT_IPV4_CIDR"', source)
+        self.assertIn("nmcli connection add", source)
+        self.assertIn('connection up uuid "$HOTSPOT_PROFILE_UUID"', source)
+        self.assertNotIn("nmcli device wifi hotspot", source)
+        self.assertIn("port=0", source)
+        self.assertIn("port=0", postinst)
+        self.assertIn('ipv4.addresses "$HOTSPOT_IPV4_CIDR"', source)
         self.assertIn("Hotspot activation did not reach the required AP/IP postcondition", source)
+
+    def test_wifi_roles_are_based_on_profile_mode_not_pins_name_prefix(self):
+        watchdog = self.read(WATCHDOG)
+        dispatcher = self.read(DISPATCHER)
+        self.assertIn("802-11-wireless.mode", watchdog)
+        self.assertIn("802-11-wireless.mode", dispatcher)
+        self.assertNotIn("grep -E '^(Hotspot|hotspot-ap|pins-)'", watchdog)
+        self.assertNotIn("grep -E '^(Hotspot|hotspot-ap|pins-)'", dispatcher)
 
     def test_client_wifi_wins_autoconnect_priority_over_fallback_hotspot(self):
         source = self.read(WIFI_CONNECT)
@@ -149,6 +163,43 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         self.assertIn("<port>8000</port>", avahi_service)
         self.assertIn("<name replace-wildcards=\"yes\">%h</name>", avahi_service)
         self.assertIn("<txt-record>backendPort=5000</txt-record>", avahi_service)
+
+    def test_diagnostics_capture_networkmanager_and_socket_ownership(self):
+        source = self.read(COLLECT_DIAGNOSTICS)
+        self.assertIn("diagnostics_schema=2", source)
+        self.assertIn("journal-boots.txt", source)
+        self.assertIn("journal-networkmanager.txt", source)
+        self.assertIn("journal-networkmanager-current-boot.txt", source)
+        self.assertIn("journal-networkmanager-current-boot-monotonic.txt", source)
+        self.assertIn("journal-networkmanager-previous-boot.txt", source)
+        self.assertIn("journal-kernel-current-boot.txt", source)
+        self.assertIn("journal-kernel-previous-boot.txt", source)
+        self.assertIn("systemctl-networkmanager.txt", source)
+        self.assertIn("listening-sockets.txt", source)
+        self.assertIn("ss -lntup", source)
+        self.assertIn("nmcli-connections.txt", source)
+        self.assertIn("nmcli-device-details.txt", source)
+        self.assertIn("network/connections/$profile_uuid.txt", source)
+        self.assertIn("ip-route-all-tables-v4.txt", source)
+        self.assertIn("firewall-nft.txt", source)
+        self.assertIn("ethtool -S", source)
+        self.assertIn("carrier_changes", source)
+        self.assertIn("process-summary.txt", source)
+        self.assertIn("raspberry-pi-throttling.txt", source)
+        self.assertIn("dbus-networkmanager.txt", source)
+        self.assertIn("installed-network-script-hashes.txt", source)
+        self.assertIn("recovery-state.txt", source)
+        self.assertIn("wifi-config.txt", source)
+
+    def test_diagnostics_do_not_collect_network_or_api_secrets(self):
+        source = self.read(COLLECT_DIAGNOSTICS)
+        self.assertNotIn("--show-secrets", source)
+        self.assertNotIn("wifi-sec.psk", source)
+        self.assertNotIn("hotspot_config.json", source)
+        self.assertNotIn("API_TOKEN", source)
+        self.assertNotIn("systemctl cat sysupdate-api", source)
+        self.assertNotIn("ps aux", source)
+        self.assertNotIn("ps -ef", source)
 
     def test_hotspot_and_mdns_share_the_persisted_rig_name(self):
         workflow = self.read(REPO_ROOT / ".github" / "workflows" / "build-deb.yml")

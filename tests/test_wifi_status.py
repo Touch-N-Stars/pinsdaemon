@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app import main
 
@@ -17,9 +17,9 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
     async def test_read_active_wifi_client_connection_prefers_configured_client_and_skips_hotspot(self):
         output = "\n".join(
             [
-                "pins-123:802-11-wireless:wlan1",
-                "OtherWifi:802-11-wireless:wlan2",
-                "pins-client-605c408f2ebf168c:802-11-wireless:wlan0",
+                "ap-uuid:pins-123:802-11-wireless:wlan1",
+                "other-uuid:OtherWifi:802-11-wireless:wlan2",
+                "client-uuid:pins-client-605c408f2ebf168c:802-11-wireless:wlan0",
             ]
         )
 
@@ -27,15 +27,26 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
             return FakeProcess(output)
 
         with patch.object(main, "_get_configured_wifi_interfaces", return_value=("wlan0", "wlan1")):
-            with patch.object(main.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+            with patch.object(main.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec), patch.object(
+                main,
+                "_wifi_connection_role",
+                new=AsyncMock(side_effect=lambda uuid, _name: "hotspot" if uuid == "ap-uuid" else "client"),
+            ):
                 connection_name, interface = await main._read_active_wifi_client_connection()
 
         self.assertEqual(connection_name, "pins-client-605c408f2ebf168c")
         self.assertEqual(interface, "wlan0")
 
-    def test_managed_client_profile_name_is_not_classified_as_hotspot(self):
+    def test_pins_prefixed_profile_name_is_not_assumed_to_be_a_hotspot(self):
         self.assertFalse(main._is_hotspot_connection_name("pins-client-605c408f2ebf168c"))
-        self.assertTrue(main._is_hotspot_connection_name("pins-ce29c"))
+        self.assertFalse(main._is_hotspot_connection_name("pins-ce29c"))
+        self.assertTrue(main._is_hotspot_connection_name("Hotspot"))
+
+    async def test_wifi_connection_role_uses_profile_mode_not_pins_name(self):
+        with patch.object(main, "_read_wifi_profile_mode", new=AsyncMock(return_value="infrastructure")):
+            self.assertEqual(await main._wifi_connection_role("client-uuid", "pins-home"), "client")
+        with patch.object(main, "_read_wifi_profile_mode", new=AsyncMock(return_value="ap")):
+            self.assertEqual(await main._wifi_connection_role("ap-uuid", "Anything"), "hotspot")
 
     async def test_read_nmcli_ipv4_address_strips_cidr_suffix(self):
         async def fake_create_subprocess_exec(*args, **kwargs):
@@ -49,8 +60,8 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
     async def test_read_active_wifi_connections_includes_client_and_hotspot_roles(self):
         output = "\n".join(
             [
-                "pins-123:802-11-wireless:wlan1",
-                "pins-client-605c408f2ebf168c:802-11-wireless:wlan0",
+                "ap-uuid:pins-123:802-11-wireless:wlan1",
+                "client-uuid:pins-client-605c408f2ebf168c:802-11-wireless:wlan0",
             ]
         )
 
@@ -58,7 +69,11 @@ class WifiStatusHelpersTests(unittest.IsolatedAsyncioTestCase):
             return FakeProcess(output)
 
         with patch.object(main, "_get_configured_wifi_interfaces", return_value=("wlan0", "wlan1")):
-            with patch.object(main.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+            with patch.object(main.asyncio, "create_subprocess_exec", side_effect=fake_create_subprocess_exec), patch.object(
+                main,
+                "_wifi_connection_role",
+                new=AsyncMock(side_effect=lambda uuid, _name: "hotspot" if uuid == "ap-uuid" else "client"),
+            ):
                 connections = await main._read_active_wifi_connections()
 
         self.assertEqual(

@@ -65,8 +65,8 @@ graph TD
   API -->|Repo metadata| Repo[(APT Packages index)]
   API -->|Release metadata| GitHub[(GitHub Releases API)]
 
-  NM[NetworkManager Dispatcher] --> WifiRecovery[90-pins-wifi-recovery]
-  WifiRecovery -->|Reconnect / fallback| WifiConnect
+  NM[NetworkManager Dispatcher] --> WifiObserver[90-pins-wifi-recovery]
+  WifiObserver -->|Persist manual client hand-off only| WifiConfig[(wifi_config.json)]
 
   Timer[pins-wifi-watchdog.timer, every 10s] --> Watchdog[pins-wifi-watchdog.sh]
   Watchdog -->|Ping gateway; fallback after N failures| WifiConnect
@@ -229,16 +229,16 @@ Adapter inventory and role selection are available before scanning:
 Connect to a specific Wi-Fi network. If connection fails, it automatically reverts to Hotspot mode.
 
 Runtime behavior:
-- A NetworkManager dispatcher hook (`90-pins-wifi-recovery`) monitors disconnect/change events on the configured client/hotspot interfaces.
-- It retries reconnection to the configured auto-connect SSID (default: 3 attempts, 5s backoff).
-- If retries fail, it enables the device hotspot automatically.
-- PINS-managed client Wi-Fi profiles use NetworkManager autoconnect priority `100`; the fallback hotspot uses priority `0`. On boot, an available saved client network therefore wins. Recovery still activates the hotspot explicitly after client retries fail, so fallback behavior does not depend on autoconnect priority.
+- The timer watchdog is the single owner of automatic recovery and fallback decisions. The NetworkManager dispatcher hook (`90-pins-wifi-recovery`) only persists a successful manual/VNC client activation that leaves single-radio hotspot-only mode; it never launches reconnect or hotspot commands from a NetworkManager callback.
+- PINS-managed client Wi-Fi profiles use NetworkManager autoconnect priority `100`; the fallback hotspot uses priority `0`. On boot, an available saved client network therefore wins. Startup management and the watchdog still activate the hotspot explicitly when client connectivity is unavailable, so fallback behavior does not depend on autoconnect priority.
 - NetworkManager is the only durable owner of client credentials. The password is transported to the privileged connection job over stdin, is never written to `wifi_config.json`, and is not included in job commands or logs.
 - New client profiles use deterministic PINS connection IDs and UUIDs. Automatic recovery activates the saved UUID only; it never retries a secured network without a stored NetworkManager secret.
 - `wifi_config.json` is updated atomically only after the requested profile is active on the selected client interface and has an IPv4 address. A failed request keeps the previous desired network and rolls back to the hotspot.
 - With two Wi-Fi adapters, the internal adapter remains the default client and the optional second adapter hosts the hotspot. With one adapter, the hotspot is stopped before the client attempt and restored on failure.
-- `pins-wifi-watchdog.timer` also runs `pins-wifi-watchdog.sh` every 10s to actively ping the client interface's default gateway. This does not depend on NetworkManager deciding a disconnect happened: it covers the case where the Wi-Fi client stays reported as "connected" while the router/AP behind it is actually unreachable, which never fires a dispatcher event and would otherwise leave the device stranded. After 3 consecutive failed checks (~30 seconds) it forces the fallback hotspot the same way the dispatcher hook does.
-- The dispatcher, watchdog, and manual/API Wi-Fi connection path share `/run/pins-wifi-coordination.lock`. A kernel-managed exclusive lock serializes their complete NetworkManager operations so client and hotspot activation cannot race on a single Wi-Fi radio.
+- `pins-wifi-watchdog.timer` runs `pins-wifi-watchdog.sh` every 10s to actively ping the client interface's default gateway. After 3 consecutive failed checks (~30 seconds) it forces the fallback hotspot. A failed hotspot activation rebuilds the complete failure window before retrying, preventing NetworkManager event storms.
+- The dispatcher, watchdog, and manual/API Wi-Fi connection path share `/run/pins-wifi-coordination.lock`. The dispatcher only serializes its atomic mode-file hand-off; all NetworkManager mutations are owned by the watchdog or the manual/API path.
+- Hotspot profiles are fully configured before their first activation, avoiding a dnsmasq teardown/reactivation race. The local-only hotspot's dnsmasq is DHCP-only (`port=0`), so an existing DNS listener on port 53 cannot prevent AP activation; mDNS remains available through Avahi.
+- Wi-Fi roles are determined from the active NetworkManager profile's `802-11-wireless.mode`, never from an SSID or profile-name prefix such as `pins-`.
 - Recovery state transitions are written to the daily on-disk Wi-Fi logs, including restored client connectivity, confirmed hotspot activation, and failed hotspot attempts.
 - The Debian package enables persistent systemd journal storage through `/etc/systemd/journald.conf.d/90-pins-persistent.conf`, so NetworkManager and service logs remain available after reboot.
 
@@ -555,12 +555,19 @@ Download archive when status is `success`:
 
 The ZIP contains selected troubleshooting data such as:
 
-- `journalctl -u pins` and `journalctl -u sysupdate-api` logs
+- a versioned manifest with boot ID, collection timestamps, and duration
+- current and historical `pins`, `sysupdate-api`, NetworkManager, watchdog, dispatcher, Avahi, and kernel journals
 - local pinsdaemon daily log files from `/opt/pinsdaemon/logs` retained for 5 days, including daemon output, job output, and Wi-Fi recovery decisions
 - `lsusb`, `lsusb -t`, `usb-devices`
-- `dmesg` tail and USB-focused dmesg filters
-- `nmcli`, `ip`, `rfkill`, and `iw` outputs
+- `dmesg` tail plus USB- and network-focused driver filters
+- NetworkManager device/profile state without connection secrets
+- IPv4/IPv6 addresses, every routing table and rule, neighbors, DNS state, firewall rules, listening socket owners, and recovery-lock state
+- per-interface carrier/operational state, driver identity, counters, `ethtool` statistics, and Wi-Fi link information
+- process/resource summaries without command-line arguments, failed units, timers, package versions, and installed network-script hashes
 - basic system details (`uname`, `os-release`, `timedatectl`, service status)
+
+The collector deliberately excludes NetworkManager secrets, hotspot passwords,
+process command-line arguments, and the daemon API token.
 
 ### 13. Check Updates
 

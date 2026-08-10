@@ -3,7 +3,6 @@ import json
 import subprocess
 import sys
 import os
-import time
 import re
 
 # Configuration paths
@@ -96,34 +95,26 @@ def load_config():
                 print(f"Error loading config from {path}: {e}")
     return None
 
-def scan_networks(ssid, interface):
-    try:
-        # Force a scan
-        subprocess.run(["nmcli", "device", "wifi", "rescan", "ifname", interface], check=False)
-        time.sleep(3)
-        
-        # List networks
-        result = subprocess.run(
-            ["nmcli", "-t", "-f", "SSID", "device", "wifi", "list"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        available_ssids = result.stdout.strip().split('\n')
-        return ssid in available_ssids
-    except subprocess.CalledProcessError as e:
-        print(f"Error scanning networks: {e}")
-        return False
+def normalize_band(band):
+    if not isinstance(band, str):
+        return ""
+    candidate = band.strip().lower()
+    if candidate in {"2.4ghz", "bg"}:
+        return "bg"
+    if candidate in {"5ghz", "a"}:
+        return "a"
+    return ""
 
 def connect_to_wifi(ssid, band=None, client_interface=DEFAULT_WIFI_INTERFACE, hotspot_interface=DEFAULT_WIFI_INTERFACE):
     print(f"Attempting to connect to {ssid} (Band: {band}, client={client_interface}, hotspot={hotspot_interface})...")
     try:
+        normalized_band = normalize_band(band)
         args = wifi_connect_cmd(
             "--password-stdin",
             "--client-iface", client_interface,
             "--hotspot-iface", hotspot_interface,
             "--auto-connect", "yes",
-            "--band", band if band else "",
+            "--band", normalized_band,
             ssid,
         )
 
@@ -134,7 +125,44 @@ def connect_to_wifi(ssid, band=None, client_interface=DEFAULT_WIFI_INTERFACE, ho
         print(f"Exception during connection: {e}")
         return False
 
+def hotspot_is_ready(interface):
+    try:
+        active = subprocess.run(
+            ["nmcli", "-t", "-f", "UUID,TYPE,DEVICE", "connection", "show", "--active"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        for line in active.stdout.splitlines():
+            fields = line.split(":", 2)
+            if len(fields) != 3 or fields[1] != "802-11-wireless" or fields[2] != interface:
+                continue
+            mode = subprocess.run(
+                ["nmcli", "-g", "802-11-wireless.mode", "connection", "show", "uuid", fields[0]],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if mode.returncode != 0 or mode.stdout.strip() != "ap":
+                continue
+            addresses = subprocess.run(
+                ["nmcli", "-g", "IP4.ADDRESS", "device", "show", interface],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return addresses.returncode == 0 and any(
+                address.strip().startswith("10.42.0.1/")
+                for address in addresses.stdout.splitlines()
+            )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return False
+
 def start_hotspot(client_interface=DEFAULT_WIFI_INTERFACE, hotspot_interface=DEFAULT_WIFI_INTERFACE):
+    if hotspot_is_ready(hotspot_interface):
+        print(f"Fallback hotspot is already active on {hotspot_interface}.")
+        return
     print(f"Starting hotspot on {hotspot_interface} (client iface: {client_interface})...")
     try:
         subprocess.run(
@@ -170,14 +198,14 @@ def main():
 
     if auto_connect and ssid:
         print(f"Auto-connect enabled for SSID: {ssid}")
-        if scan_networks(ssid, client_interface):
-            print(f"Network {ssid} found.")
-            if connect_to_wifi(ssid, band, client_interface, hotspot_interface):
-                 sys.exit(0)
-            else:
-                 print("Connection failed.")
+        # wifi-connect.sh owns the complete radio transition. On a single
+        # adapter it must stop the AP before NetworkManager can scan or
+        # activate the saved client profile. A pre-scan here runs while the
+        # radio is still in AP mode and incorrectly reports the WLAN missing.
+        if connect_to_wifi(ssid, band, client_interface, hotspot_interface):
+            sys.exit(0)
         else:
-            print(f"Network {ssid} not found in scan results.")
+            print("Connection failed.")
     else:
         print("Auto-connect disabled or SSID not configured.")
 

@@ -167,6 +167,7 @@ mkdir -p /etc/NetworkManager/dnsmasq-shared.d
 cat > /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf <<'EOF'
 # PINS fallback hotspot is local-only: hand out an address, but no gateway/DNS.
 # This keeps phones using LTE/5G for Internet while connected to the device AP.
+port=0
 dhcp-option=3
 dhcp-option=6
 EOF
