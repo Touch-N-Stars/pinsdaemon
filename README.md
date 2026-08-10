@@ -4,13 +4,14 @@ A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expo
 
 ## Features
 
-- **System Updates**: Trigger `apt update && apt upgrade` remotely.
+- **System Updates**: Trigger the packaged, systemd-backed PINS upgrade workflow remotely.
 - **Firmware Management**: Upload versioned firmware archives and install contained `.deb` packages asynchronously.
 - **ASTAP Star Database Management**: List and install supported ASTAP star databases (D50, D05, G05, W08) for Raspberry Pi 64-bit.
 - **Samba Management**: Enable or disable SMB shares for file access.
 - **PHD2 Management**: Check and control `phd2` service state.
 - **Wi-Fi Management**: Scan for available networks, connect securely, configure auto-connect, and inspect current connection status.
-- **Wi-Fi Runtime Recovery**: Retries reconnect when wlan0 drops and falls back to device hotspot after repeated failures.
+- **Wi-Fi Runtime Recovery**: Retries the configured client interface when connectivity
+  is lost and falls back to the device hotspot after repeated failures.
 - **System Utilities**: Read Pi temperature, read system time, and set system time.
 - **Secure Architecture**:
   - Runs as a restricted user (`sysupdate-api`).
@@ -83,7 +84,27 @@ records resolve to the same hostname without creating `-2`/`-3` aliases.
 
 ## API Endpoints
 
-All HTTP endpoints require the `Authorization: Bearer <token>` header.
+All HTTP endpoints except `GET /health` require the
+`Authorization: Bearer <token>` header. The job-log WebSocket authenticates with
+the same token in its `?token=` query parameter.
+
+### Rig Health and Discovery
+
+- **URL**: `GET /health`
+- **Authentication**: none
+- **Response**:
+  ```json
+  {
+    "status": "ok",
+    "service": "pinsdaemon",
+    "rigId": "pins-a1b2c3",
+    "apiVersion": 2
+  }
+  ```
+
+This endpoint deliberately exposes only stable rig identity and compatibility
+information. Touch-N-Stars uses it to reject a reachable endpoint belonging to a
+different rig while recovering from Wi-Fi changes.
 
 ### 1. System Upgrade
 
@@ -176,6 +197,16 @@ Check or toggle `phd2` state.
 ### 5. Wi-Fi Scan
 
 Get a list of available Wi-Fi networks.
+
+Adapter inventory and role selection are available before scanning:
+
+- `GET /wifi/adapters` returns detected Wi-Fi interfaces, state, current
+  connection, inferred role, MAC address, driver, and MTU.
+- `GET /wifi/interfaces` returns the effective `client_interface` and
+  `hotspot_interface`.
+- `POST /wifi/interfaces` accepts those two optional snake-case fields, validates
+  them against the detected adapters, persists the resolved roles, and schedules
+  one reconciliation pass when the roles changed.
 
 - **URL**: `GET /wifi/scan`
 - **Response**: List of network objects.
@@ -355,6 +386,10 @@ of `disconnected`, `client`, `hotspot`, `dual`, or `unknown`.
     ]
   }
   ```
+
+Connected hotspot clients can be read from `GET /wifi/clients`. It returns a
+`clients` array containing the IP address, MAC address, optional hostname, and
+lease-expiry timestamp parsed from the first readable dnsmasq lease file.
 
 ### 11. Hotspot Password
 
@@ -559,6 +594,21 @@ The daemon reads installed versions locally and compares them against the config
   - `UPDATES_PACKAGES_URL` (default: `https://repo.touch-n-stars.eu/reprepro/dists/trixie/main/binary-arm64/Packages`)
   - `UPDATES_PACKAGE_PATTERNS` (default: `pins,pinsdaemon,pins-plugin-*`)
 
+### PINS Plugin Packages
+
+`GET /plugins` lists the daemon's allowlisted PINS plugin packages with installed
+and repository versions. `POST /plugins/install` and `POST /plugins/uninstall`
+accept:
+
+```json
+{
+  "packageName": "pins-plugin-example"
+}
+```
+
+Mutating operations return a `JobResponse`. Protected core packages and names
+outside the daemon allowlist cannot be removed through these endpoints.
+
 ### 14. Indi3rdparty Packages
 
 List available packages from the latest GitHub release of:
@@ -698,6 +748,11 @@ Check the status of a background job.
 - **URL**: `GET /jobs/{jobId}`
 - **Response**: `JobResponse` object.
 
+`GET /jobs/latest` returns the newest runtime job or the persisted last-upgrade
+job, whichever started later. General runtime jobs and their captured logs are
+held in memory and do not survive a daemon restart; the last upgrade job is the
+documented persistence exception.
+
 ### 17. Job Logs (WebSocket)
 
 Stream live logs from a running job.
@@ -817,7 +872,7 @@ When installing a newer `pinsdaemon` `.deb`, package hooks perform the following
 
 ### Manual / Development Setup
 
-1.  **Prerequisites**: Python 3.9+, `venv`.
+1.  **Prerequisites**: Python 3.10+ (`3.12` is used in CI), `venv`.
 2.  **User Setup**:
     ```bash
     sudo useradd -r -s /bin/false sysupdate-api
