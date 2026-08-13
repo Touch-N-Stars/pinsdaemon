@@ -8,6 +8,9 @@ COORDINATION_LOCK_WAIT_SECONDS="${PINS_WIFI_COORDINATION_LOCK_WAIT_SECONDS:-30}"
 DEFAULT_WIFI_INTERFACE="wlan0"
 RIG_NAME_COMMAND="${PINS_RIG_NAME_COMMAND:-/usr/local/bin/pins-rig-name}"
 WIFI_PROFILE_COMMAND="${PINS_WIFI_PROFILE_COMMAND:-/usr/local/bin/pins-wifi-profile.py}"
+VIABILITY_COMMAND="${PINS_WIFI_VIABILITY_COMMAND:-/usr/local/bin/pins-wifi-viability.py}"
+PEER_STATE_FILE="${PINS_WIFI_PEER_STATE_FILE:-/run/pins-wifi-watchdog.peer.json}"
+VIABILITY_OUTER_TIMEOUT_SECONDS="${PINS_WIFI_VIABILITY_OUTER_TIMEOUT:-15}"
 NM_DNSMASQ_SHARED_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 PINS_LOCAL_ONLY_DHCP_CONF="$NM_DNSMASQ_SHARED_DIR/pins-local-only.conf"
 HOTSPOT_IPV4_CIDR="${PINS_HOTSPOT_IPV4_CIDR:-10.42.0.1/24}"
@@ -185,6 +188,55 @@ hotspot_postcondition_met() {
     is_hotspot_active_on_interface "$iface" || return 1
     nmcli -g IP4.ADDRESS device show "$iface" 2>/dev/null \
         | grep -qE "^${HOTSPOT_IPV4_ADDRESS//./\\.}/[0-9]+$"
+}
+
+verified_pins_peer_connection() {
+    local output rc
+    [ -x "$VIABILITY_COMMAND" ] || return 1
+    command -v timeout >/dev/null 2>&1 || return 1
+    if output="$(
+        timeout --kill-after=1s "${VIABILITY_OUTER_TIMEOUT_SECONDS}s" \
+            "$VIABILITY_COMMAND" \
+            --interface "$CLIENT_IFACE" \
+            --peer-state-file "$PEER_STATE_FILE" \
+            --connection-commit \
+            --confirm-peer \
+            2>/dev/null
+    )"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    [ "$rc" -eq 0 ] || return 1
+    output="${output##*$'\n'}"
+    [[ "$output" == "PINS_WIFI_VIABILITY status=healthy mode=pins-peer reason="* ]]
+}
+
+client_overlaps_hotspot_subnet() {
+    local -a client_addresses=()
+    mapfile -t client_addresses < <(
+        nmcli -g IP4.ADDRESS device show "$CLIENT_IFACE" 2>/dev/null \
+            | sed '/^[[:space:]]*$/d'
+    )
+    [ "${#client_addresses[@]}" -gt 0 ] || return 1
+    python3 - "$HOTSPOT_IPV4_CIDR" "${client_addresses[@]}" <<'PY'
+import ipaddress
+import sys
+
+try:
+    hotspot = ipaddress.IPv4Interface(sys.argv[1]).network
+except ValueError:
+    raise SystemExit(1)
+
+for raw in sys.argv[2:]:
+    try:
+        client = ipaddress.IPv4Interface(raw).network
+    except ValueError:
+        continue
+    if client.overlaps(hotspot):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 ensure_local_only_hotspot_dhcp() {
@@ -367,6 +419,11 @@ enable_hotspot() {
 
     ensure_local_only_hotspot_dhcp
 
+    if [ "$PARALLEL_WIFI_MODE" = true ] && client_overlaps_hotspot_subnet; then
+        echo "Disconnecting overlapping client subnet before restoring the PINS hotspot."
+        deactivate_client_on_interface "$CLIENT_IFACE"
+    fi
+
     # Ensure client mode is dropped before creating AP mode.
     nmcli device disconnect "$HOTSPOT_IFACE" >/dev/null 2>&1 || true
 
@@ -513,7 +570,9 @@ if ! printf '%s\n' "$PASSWORD" | "$WIFI_PROFILE_COMMAND" \
     --auto-connect "$AUTO_CONNECT" \
     --config-file "$WIFI_CONFIG_FILE"; then
     PASSWORD=""
-    if ! enable_hotspot; then
+    if [ "$PARALLEL_WIFI_MODE" = true ] && verified_pins_peer_connection; then
+        echo "Previous verified PINS peer connection was restored. Keeping the conflicting local hotspot suspended."
+    elif ! enable_hotspot; then
         echo "PINS_WIFI_RESULT code=HOTSPOT_SWITCH_FAILED message=Hotspot_rollback_failed"
     fi
     exit 1
@@ -523,7 +582,9 @@ PASSWORD=""
 echo "Client Wi-Fi connection verified."
 
 if [ "$PARALLEL_WIFI_MODE" = true ]; then
-    if ! is_hotspot_active_on_interface "$HOTSPOT_IFACE"; then
+    if verified_pins_peer_connection; then
+        echo "Parallel adapters detected, but both PINS hotspots use 10.42.0.1/24. Keeping the local hotspot suspended while connected to the peer."
+    elif ! is_hotspot_active_on_interface "$HOTSPOT_IFACE"; then
         echo "Parallel mode: hotspot not active on $HOTSPOT_IFACE. Starting hotspot..."
         enable_hotspot || echo "Warning: failed to enable hotspot in parallel mode."
     else

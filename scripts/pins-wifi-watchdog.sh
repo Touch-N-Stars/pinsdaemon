@@ -13,8 +13,10 @@ set -euo pipefail
 
 COORDINATION_LOCK_FILE="/run/pins-wifi-coordination.lock"
 STATE_FILE="/run/pins-wifi-watchdog.failures"
+PEER_STATE_FILE="${PINS_WIFI_PEER_STATE_FILE:-/run/pins-wifi-watchdog.peer.json}"
 WIFI_CONFIG_FILE="/opt/pinsdaemon/app/wifi_config.json"
 WIFI_CONNECT_SCRIPT="/usr/local/bin/wifi-connect.sh"
+VIABILITY_COMMAND="${PINS_WIFI_VIABILITY_COMMAND:-/usr/local/bin/pins-wifi-viability.py}"
 LOG_TAG="pins-wifi-watchdog"
 DEFAULT_WIFI_INTERFACE="wlan0"
 LOCAL_LOG_DIR="${PINSDAEMON_LOG_DIR:-/opt/pinsdaemon/logs}"
@@ -24,6 +26,8 @@ LOCAL_LOG_RETENTION_DAYS="${PINSDAEMON_LOG_RETENTION_DAYS:-5}"
 # of sustained unreachability before falling back, absorbing transient blips.
 MAX_FAILURES="${PINS_WIFI_WATCHDOG_MAX_FAILURES:-3}"
 PING_TIMEOUT_SECONDS="${PINS_WIFI_WATCHDOG_PING_TIMEOUT:-2}"
+PEER_HEALTH_TIMEOUT_SECONDS="${PINS_WIFI_PEER_HEALTH_TIMEOUT:-2}"
+VIABILITY_OUTER_TIMEOUT_SECONDS="${PINS_WIFI_VIABILITY_OUTER_TIMEOUT:-15}"
 
 prune_local_logs() {
     mkdir -p "$LOCAL_LOG_DIR" 2>/dev/null || return 0
@@ -118,6 +122,10 @@ set_failures() {
     printf "%s\n" "$1" > "$STATE_FILE"
 }
 
+clear_peer_state() {
+    rm -f -- "$PEER_STATE_FILE" 2>/dev/null || true
+}
+
 is_hotspot_active() {
     while IFS=: read -r profile_uuid profile_type profile_iface; do
         [[ "$profile_type" == "802-11-wireless" && "$profile_iface" == "$HOTSPOT_IFACE" ]] || continue
@@ -143,6 +151,7 @@ if is_hotspot_active; then
     if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
         log "Fallback hotspot is active on ${HOTSPOT_IFACE}; recovery confirmed"
     fi
+    clear_peer_state
     set_failures 0
     exit 0
 fi
@@ -152,6 +161,7 @@ fi
 # even if that dispatcher event is delayed or unavailable.
 if [[ "$DESIRED_MODE" == "hotspot" && "$CLIENT_IFACE" == "$HOTSPOT_IFACE" ]] \
     && is_wifi_client_active; then
+    clear_peer_state
     set_failures 0
     exit 0
 fi
@@ -160,6 +170,7 @@ if [[ "$DESIRED_MODE" == "hotspot" ]]; then
     log "Persistent hotspot mode requested; enabling hotspot on ${HOTSPOT_IFACE}"
     if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1; then
         log "Persistent hotspot enabled successfully on ${HOTSPOT_IFACE}"
+        clear_peer_state
         set_failures 0
     else
         log "Failed to enable persistent hotspot on ${HOTSPOT_IFACE}; will retry"
@@ -168,21 +179,55 @@ if [[ "$DESIRED_MODE" == "hotspot" ]]; then
     exit 0
 fi
 
-gateway_reachable() {
-    local gateway
-    gateway="$(ip -4 route show dev "$CLIENT_IFACE" default 2>/dev/null | awk '/via/ {print $3; exit}')"
-    if [[ -z "$gateway" ]]; then
-        # No default route (or no gateway on the default route) on the
-        # client interface: not usably connected.
-        return 1
-    fi
-    ping -I "$CLIENT_IFACE" -c 1 -W "$PING_TIMEOUT_SECONDS" "$gateway" >/dev/null 2>&1
-}
+VIABILITY_OUTPUT=""
+VIABILITY_MODE="unknown"
+VIABILITY_REASON="checker_unavailable"
+VIABILITY_RC=124
+if command -v timeout >/dev/null 2>&1 && VIABILITY_OUTPUT="$(
+    timeout --kill-after=1s "${VIABILITY_OUTER_TIMEOUT_SECONDS}s" \
+        "$VIABILITY_COMMAND" \
+            --interface "$CLIENT_IFACE" \
+            --peer-state-file "$PEER_STATE_FILE" \
+            --ping-timeout "$PING_TIMEOUT_SECONDS" \
+            --health-timeout "$PEER_HEALTH_TIMEOUT_SECONDS" \
+            2>/dev/null
+)"; then
+    VIABILITY_RC=0
+else
+    VIABILITY_RC=$?
+fi
 
-if gateway_reachable; then
+VIABILITY_OUTPUT="${VIABILITY_OUTPUT##*$'\n'}"
+if [[ "$VIABILITY_OUTPUT" == PINS_WIFI_VIABILITY\ * ]]; then
+    read -r -a VIABILITY_FIELDS <<< "$VIABILITY_OUTPUT"
+    for field in "${VIABILITY_FIELDS[@]}"; do
+        case "$field" in
+            mode=*) VIABILITY_MODE="${field#mode=}" ;;
+            reason=*) VIABILITY_REASON="${field#reason=}" ;;
+        esac
+    done
+fi
+
+VIABILITY_HEALTHY=false
+if [[ "$VIABILITY_RC" -eq 0 ]]; then
+    case "$VIABILITY_OUTPUT" in
+        "PINS_WIFI_VIABILITY status=healthy mode=gateway reason="*|\
+        "PINS_WIFI_VIABILITY status=healthy mode=pins-peer reason="*)
+            VIABILITY_HEALTHY=true
+            ;;
+    esac
+fi
+
+if [[ "$VIABILITY_HEALTHY" == true ]]; then
     FAILURES="$(get_failures)"
     if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
-        log "Gateway connectivity restored on ${CLIENT_IFACE} after ${FAILURES} failed check(s)"
+        if [[ "$VIABILITY_MODE" == "gateway" ]]; then
+            log "Gateway connectivity restored on ${CLIENT_IFACE} after ${FAILURES} failed check(s)"
+        elif [[ "$VIABILITY_MODE" == "pins-peer" ]]; then
+            log "Verified PINS peer connectivity restored on ${CLIENT_IFACE} after ${FAILURES} failed check(s)"
+        else
+            log "Wi-Fi connectivity restored on ${CLIENT_IFACE} after ${FAILURES} failed check(s)"
+        fi
     fi
     set_failures 0
     exit 0
@@ -196,13 +241,14 @@ FAILURES=$((FAILURES + 1))
 set_failures "$FAILURES"
 
 if [[ "$FAILURES" -lt "$MAX_FAILURES" ]]; then
-    log "Gateway unreachable on ${CLIENT_IFACE} (check ${FAILURES}/${MAX_FAILURES}); waiting"
+    log "Wi-Fi viability failed on ${CLIENT_IFACE} (${VIABILITY_MODE}/${VIABILITY_REASON}, check ${FAILURES}/${MAX_FAILURES}); waiting"
     exit 0
 fi
 
-log "Gateway unreachable on ${CLIENT_IFACE} after ${MAX_FAILURES} consecutive checks; enabling fallback hotspot on ${HOTSPOT_IFACE}"
+log "Wi-Fi viability failed on ${CLIENT_IFACE} after ${MAX_FAILURES} consecutive checks (${VIABILITY_MODE}/${VIABILITY_REASON}); enabling fallback hotspot on ${HOTSPOT_IFACE}"
 if PINS_WIFI_COORDINATION_LOCK_HELD=1 "$WIFI_CONNECT_SCRIPT" --hotspot --client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE" >/dev/null 2>&1; then
     log "Fallback hotspot enabled successfully on ${HOTSPOT_IFACE}"
+    clear_peer_state
     set_failures 0
 else
     log "Failed to enable fallback hotspot on ${HOTSPOT_IFACE}; backing off before retry"

@@ -8,6 +8,7 @@ WATCHDOG = REPO_ROOT / "scripts" / "pins-wifi-watchdog.sh"
 DISPATCHER = REPO_ROOT / "scripts" / "90-pins-wifi-recovery"
 WIFI_CONNECT = REPO_ROOT / "scripts" / "wifi-connect.sh"
 COLLECT_DIAGNOSTICS = REPO_ROOT / "scripts" / "collect-diagnostics.sh"
+VIABILITY = REPO_ROOT / "scripts" / "pins-wifi-viability.py"
 
 
 class WifiRecoveryCoordinationTests(unittest.TestCase):
@@ -65,6 +66,20 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         self.assertIn("set_failures 0", source)
         self.assertIn('DESIRED_MODE="${IFACES[2]:-auto}"', source)
         self.assertIn('if [[ "$DESIRED_MODE" == "hotspot" ]]', source)
+
+    def test_watchdog_uses_bounded_gateway_or_verified_peer_validation(self):
+        source = self.read(WATCHDOG)
+        viability = self.read(VIABILITY)
+        self.assertIn('VIABILITY_COMMAND="${PINS_WIFI_VIABILITY_COMMAND', source)
+        self.assertIn("timeout --kill-after=1s", source)
+        self.assertIn("--health-timeout", source)
+        self.assertIn("pins-wifi-watchdog.peer.json", source)
+        self.assertIn("status=healthy mode=gateway", source)
+        self.assertIn("status=healthy mode=pins-peer", source)
+        self.assertIn("peer_identity_pending", viability)
+        self.assertIn("peer_identity_confirmed", viability)
+        self.assertIn("SO_BINDTODEVICE", viability)
+        self.assertIn("PEER_CONFIRMATION_MAX_AGE_SECONDS", viability)
 
     def test_dispatcher_only_observes_manual_single_radio_client_activation(self):
         source = self.read(DISPATCHER)
@@ -190,6 +205,11 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         self.assertIn("installed-network-script-hashes.txt", source)
         self.assertIn("recovery-state.txt", source)
         self.assertIn("wifi-config.txt", source)
+        self.assertIn("pins-wifi-watchdog.peer.json", source)
+        self.assertIn("/usr/local/bin/pins-wifi-profile.py", source)
+        self.assertIn("/usr/local/bin/pins-wifi-viability.py", source)
+        self.assertIn("[ ! -L /run/pins-wifi-watchdog.peer.json ]", source)
+        self.assertIn("-le 4096", source)
 
     def test_diagnostics_do_not_collect_network_or_api_secrets(self):
         source = self.read(COLLECT_DIAGNOSTICS)
@@ -213,6 +233,34 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         self.assertIn("/usr/local/bin/pins-rig-name --ensure", postinst)
         self.assertIn('hostnamectl set-hostname "$PINS_RIG_NAME"', postinst)
         self.assertIn("/etc/pins/rig-name", rig_name)
+
+    def test_viability_helper_is_release_critical_and_root_owned(self):
+        workflow = self.read(REPO_ROOT / ".github" / "workflows" / "build-deb.yml")
+        postinst = self.read(REPO_ROOT / "packaging" / "DEBIAN" / "postinst")
+        self.assertIn(
+            "cp scripts/pins-wifi-viability.py build/usr/local/bin/",
+            workflow,
+        )
+        self.assertIn(
+            "grep -Fq './usr/local/bin/pins-wifi-viability.py'",
+            workflow,
+        )
+        self.assertIn("chown root:root /usr/local/bin/pins-wifi-viability.py", postinst)
+        self.assertIn("chmod 755 /usr/local/bin/pins-wifi-viability.py", postinst)
+
+    def test_peer_subnet_conflict_is_handled_without_changing_normal_dual_mode(self):
+        profile = self.read(REPO_ROOT / "scripts" / "pins-wifi-profile.py")
+        wifi_connect = self.read(WIFI_CONNECT)
+        self.assertIn("_deactivate_parallel_pins_hotspot", profile)
+        self.assertIn("IP4.ADDRESS", profile)
+        self.assertIn("profile_id != \"Hotspot\"", profile)
+        self.assertIn("client_overlaps_hotspot_subnet", wifi_connect)
+        self.assertIn("verified_pins_peer_connection", wifi_connect)
+        self.assertIn("mode=pins-peer", wifi_connect)
+        self.assertIn(
+            'elif ! is_hotspot_active_on_interface "$HOTSPOT_IFACE"; then',
+            wifi_connect,
+        )
 
     def test_legacy_private_directory_locks_are_removed(self):
         watchdog = self.read(WATCHDOG)

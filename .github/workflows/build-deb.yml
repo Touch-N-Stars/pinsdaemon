@@ -63,6 +63,7 @@ jobs:
         cp scripts/pins-rig-name build/usr/local/bin/
         cp scripts/wifi-connect.sh build/usr/local/bin/
         cp scripts/pins-wifi-profile.py build/usr/local/bin/
+        cp scripts/pins-wifi-viability.py build/usr/local/bin/
         cp scripts/wifi-automanage.py build/usr/local/bin/
         cp scripts/wifi-scan.py build/usr/local/bin/
         cp scripts/collect-diagnostics.sh build/usr/local/bin/
@@ -111,6 +112,7 @@ jobs:
     - name: Build Debian Package
       run: |
         dpkg-deb --root-owner-group --build build ${{ steps.version.outputs.filename }}
+        dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './usr/local/bin/pins-wifi-viability.py'
         
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
@@ -127,4 +129,3 @@ jobs:
         files: ${{ steps.version.outputs.filename }}
         draft: false
         prerelease: false
-

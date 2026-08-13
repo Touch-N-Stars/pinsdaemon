@@ -121,6 +121,21 @@ run_shell() {
     } >"$output_file" 2>&1 || true
 }
 
+collect_recovery_state() {
+    local file
+    for file in /run/pins-wifi*.failures; do
+        [ -e "$file" ] || continue
+        printf '%s=' "$file"
+        cat "$file"
+    done
+    if [ -f /run/pins-wifi-watchdog.peer.json ] \
+        && [ ! -L /run/pins-wifi-watchdog.peer.json ] \
+        && [ "$(stat -c %s /run/pins-wifi-watchdog.peer.json 2>/dev/null || echo 4097)" -le 4096 ]; then
+        printf '%s=' '/run/pins-wifi-watchdog.peer.json'
+        cat /run/pins-wifi-watchdog.peer.json
+    fi
+}
+
 cat >"$OUTPUT_DIR/manifest.txt" <<EOF
 diagnostics_schema=2
 collected_at=$(date --iso-8601=seconds)
@@ -169,6 +184,8 @@ if [ "$INCLUDE_SYSTEM_INFO" -eq 1 ]; then
     run_command "$OUTPUT_DIR/system/dnsmasq-version.txt" dnsmasq --version
     run_command "$OUTPUT_DIR/system/installed-network-script-hashes.txt" sha256sum \
         /usr/local/bin/wifi-connect.sh \
+        /usr/local/bin/pins-wifi-profile.py \
+        /usr/local/bin/pins-wifi-viability.py \
         /usr/local/bin/wifi-automanage.py \
         /usr/local/bin/pins-wifi-watchdog.sh \
         /usr/local/bin/collect-diagnostics.sh \
@@ -255,7 +272,7 @@ if [ "$INCLUDE_NETWORK_INFO" -eq 1 ]; then
     run_command "$OUTPUT_DIR/network/proc-net-dev.txt" cat /proc/net/dev
     run_command "$OUTPUT_DIR/network/proc-net-softnet-stat.txt" cat /proc/net/softnet_stat
     run_command "$OUTPUT_DIR/network/coordination-locks.txt" lslocks
-    run_shell "$OUTPUT_DIR/network/recovery-state.txt" "for file in /run/pins-wifi*.failures; do [ -e \"\$file\" ] || continue; printf '%s=' \"\$file\"; cat \"\$file\"; done"
+    run_command "$OUTPUT_DIR/network/recovery-state.txt" collect_recovery_state
     run_command "$OUTPUT_DIR/network/dnsmasq-shared-config.txt" cat /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf
 
     for interface_path in /sys/class/net/*; do

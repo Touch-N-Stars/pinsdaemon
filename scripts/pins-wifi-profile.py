@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -23,6 +24,13 @@ from typing import Iterable
 
 
 CONFIG_DEFAULT = "/opt/pinsdaemon/app/wifi_config.json"
+VIABILITY_COMMAND = os.environ.get(
+    "PINS_WIFI_VIABILITY_COMMAND",
+    os.path.join(os.path.dirname(__file__), "pins-wifi-viability.py"),
+)
+PEER_STATE_FILE = os.environ.get(
+    "PINS_WIFI_PEER_STATE_FILE", "/run/pins-wifi-watchdog.peer.json"
+)
 PROFILE_NAMESPACE = uuid.UUID("4db788e1-dd38-4a11-98ba-342264f0506c")
 IFACE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 VALID_BANDS = {"", "a", "bg"}
@@ -203,6 +211,158 @@ def _activate(nm: Nmcli, profile_uuid: str, interface: str, password_supplied: b
         raise WifiFailure("IP_CONFIGURATION_FAILED", "Client_has_no_IPv4_address")
 
 
+def _run_viability_check(interface: str) -> tuple[subprocess.CompletedProcess[str], str]:
+    result = subprocess.run(
+        [
+            VIABILITY_COMMAND,
+            "--interface",
+            interface,
+            "--peer-state-file",
+            PEER_STATE_FILE,
+            "--connection-commit",
+            "--confirm-peer",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    safe_output = ""
+    for line in result.stdout.strip().splitlines():
+        if line.startswith("PINS_WIFI_VIABILITY "):
+            safe_output = line
+    if safe_output:
+        print(safe_output)
+    return result, safe_output
+
+
+def _viability_succeeded(
+    result: subprocess.CompletedProcess[str], safe_output: str
+) -> bool:
+    return result.returncode == 0 and safe_output.startswith(
+        (
+            "PINS_WIFI_VIABILITY status=healthy mode=gateway reason=",
+            "PINS_WIFI_VIABILITY status=healthy mode=pins-peer reason=",
+        )
+    )
+
+
+def _deactivate_parallel_pins_hotspot(
+    nm: Nmcli,
+    client_interface: str,
+    hotspot_interface: str,
+    conflicting_address: str,
+) -> bool:
+    """Suspend the managed local AP if it overlaps a remote PINS hotspot."""
+    if client_interface == hotspot_interface:
+        return False
+    try:
+        expected_address = ipaddress.IPv4Address(conflicting_address)
+    except ipaddress.AddressValueError:
+        return False
+    addresses = nm.run(["-g", "IP4.ADDRESS", "device", "show", hotspot_interface])
+    if addresses.returncode != 0:
+        return False
+    owns_conflicting_address = False
+    for value in addresses.stdout.splitlines():
+        try:
+            owns_conflicting_address = (
+                ipaddress.IPv4Interface(value.strip()).ip == expected_address
+            )
+        except ValueError:
+            continue
+        if owns_conflicting_address:
+            break
+    if not owns_conflicting_address:
+        return False
+    active = nm.run(
+        [
+            "-t",
+            "--escape",
+            "yes",
+            "-f",
+            "UUID,TYPE,DEVICE",
+            "connection",
+            "show",
+            "--active",
+        ]
+    )
+    if active.returncode != 0:
+        return False
+    for line in active.stdout.splitlines():
+        fields = _split_terse(line)
+        if len(fields) != 3 or fields[2] != hotspot_interface:
+            continue
+        if fields[1] not in {"802-11-wireless", "wifi"}:
+            continue
+        profile_uuid = fields[0]
+        if _profile_value(nm, profile_uuid, "802-11-wireless.mode") != "ap":
+            continue
+        profile_id = _profile_value(nm, profile_uuid, "connection.id")
+        if profile_id != "Hotspot" and not profile_id.startswith("pins-hotspot-"):
+            continue
+        if nm.run(
+            [
+                "connection",
+                "modify",
+                "uuid",
+                profile_uuid,
+                "connection.autoconnect",
+                "no",
+            ]
+        ).returncode != 0:
+            return False
+        if nm.run(["connection", "down", "uuid", profile_uuid], timeout=30).returncode == 0:
+            return True
+        nm.run(
+            [
+                "connection",
+                "modify",
+                "uuid",
+                profile_uuid,
+                "connection.autoconnect",
+                "yes",
+            ]
+        )
+        return False
+    return False
+
+
+def _verify_connection_commit(
+    nm: Nmcli, interface: str, hotspot_interface: str
+) -> None:
+    """Require a verified PINS peer only when DHCP supplies no gateway."""
+    try:
+        result, safe_output = _run_viability_check(interface)
+    except (OSError, subprocess.TimeoutExpired):
+        raise WifiFailure("UNKNOWN", "Wi-Fi_viability_checker_is_unavailable")
+
+    local_address_match = re.search(
+        r"(?:^| )reason=dhcp_server_is_local_address:([0-9.]+)(?: |$)",
+        safe_output,
+    )
+    if (
+        result.returncode != 0
+        and " mode=pins-peer " in f" {safe_output} "
+        and local_address_match is not None
+        and _deactivate_parallel_pins_hotspot(
+            nm, interface, hotspot_interface, local_address_match.group(1)
+        )
+    ):
+        try:
+            result, safe_output = _run_viability_check(interface)
+        except (OSError, subprocess.TimeoutExpired):
+            raise WifiFailure("UNKNOWN", "Wi-Fi_viability_checker_is_unavailable")
+
+    if result.returncode == 0 and not _viability_succeeded(result, safe_output):
+        raise WifiFailure("UNKNOWN", "Wi-Fi_viability_checker_returned_invalid_output")
+    if result.returncode != 0:
+        raise WifiFailure(
+            "GATEWAY_UNREACHABLE",
+            "Client_without_gateway_requires_a_verified_PINS_peer",
+        )
+
+
 def _delete_profile(nm: Nmcli, profile_uuid: str) -> None:
     if _profile_exists(nm, profile_uuid):
         nm.run(["connection", "delete", "uuid", profile_uuid])
@@ -297,6 +457,7 @@ def connect(args: argparse.Namespace, password: str, nm: Nmcli) -> str:
     if not password:
         profile_uuid = _find_saved_profile(nm, args.ssid, configured_uuid)
         _activate(nm, profile_uuid, args.client_iface, False)
+        _verify_connection_commit(nm, args.client_iface, args.hotspot_iface)
     else:
         security = _scan_security(nm, args.client_iface, args.ssid)
         secured = bool(security and security != "--")
@@ -308,9 +469,11 @@ def connect(args: argparse.Namespace, password: str, nm: Nmcli) -> str:
         _create_profile(nm, profile_id=candidate_id, profile_uuid=candidate_uuid, ssid=args.ssid, interface=args.client_iface, password=password, secured=secured, band=args.band, auto_connect=False)
         try:
             _activate(nm, candidate_uuid, args.client_iface, True)
+            _verify_connection_commit(nm, args.client_iface, args.hotspot_iface)
             _delete_profile(nm, canonical_uuid)
             _create_profile(nm, profile_id=canonical_id, profile_uuid=canonical_uuid, ssid=args.ssid, interface=args.client_iface, password=password, secured=secured, band=args.band, auto_connect=args.auto_connect)
             _activate(nm, canonical_uuid, args.client_iface, True)
+            _verify_connection_commit(nm, args.client_iface, args.hotspot_iface)
             profile_uuid = canonical_uuid
         except Exception:
             _delete_profile(nm, candidate_uuid)

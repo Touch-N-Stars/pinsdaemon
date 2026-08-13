@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -75,6 +76,122 @@ class WifiProfileIdentityTests(unittest.TestCase):
         self.assertEqual(failure.code, "IP_CONFIGURATION_FAILED")
 
 
+class ConnectionViabilityTests(unittest.TestCase):
+    def test_helper_invocation_is_bounded_and_contains_no_secret(self):
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            "PINS_WIFI_VIABILITY status=healthy mode=gateway reason=gateway_present\n",
+            "",
+        )
+        with patch.object(wifi.subprocess, "run", return_value=completed) as run:
+            result, output = wifi._run_viability_check("wlan0")
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0], wifi.VIABILITY_COMMAND)
+        self.assertIn("--connection-commit", argv)
+        self.assertIn("--confirm-peer", argv)
+        self.assertEqual(argv[argv.index("--interface") + 1], "wlan0")
+        self.assertEqual(argv[argv.index("--peer-state-file") + 1], wifi.PEER_STATE_FILE)
+        self.assertNotIn("token", " ".join(argv).lower())
+        self.assertEqual(run.call_args.kwargs["timeout"], 15)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(output, completed.stdout.strip())
+
+    def test_gateway_or_verified_peer_is_accepted(self):
+        nm = FakeNmcli()
+        for mode, reason in (
+            ("gateway", "gateway_present"),
+            ("pins-peer", "peer_identity_confirmed"),
+        ):
+            with self.subTest(mode=mode), patch.object(
+                wifi,
+                "_run_viability_check",
+                return_value=(
+                    subprocess.CompletedProcess([], 0),
+                    f"PINS_WIFI_VIABILITY status=healthy mode={mode} reason={reason}",
+                ),
+            ):
+                wifi._verify_connection_commit(nm, "wlan0", "wlan1")
+
+    def test_unverified_gatewayless_client_is_rejected(self):
+        nm = FakeNmcli()
+        with patch.object(
+            wifi,
+            "_run_viability_check",
+            return_value=(
+                subprocess.CompletedProcess([], 1),
+                "PINS_WIFI_VIABILITY status=unhealthy mode=pins-peer reason=pins_health_unavailable",
+            ),
+        ):
+            with self.assertRaises(wifi.WifiFailure) as raised:
+                wifi._verify_connection_commit(nm, "wlan0", "wlan1")
+        self.assertEqual(raised.exception.code, "GATEWAY_UNREACHABLE")
+
+    def test_invalid_success_output_fails_closed(self):
+        with patch.object(
+            wifi,
+            "_run_viability_check",
+            return_value=(
+                subprocess.CompletedProcess([], 0),
+                "PINS_WIFI_VIABILITY status=healthy mode=unknown reason=unexpected",
+            ),
+        ):
+            with self.assertRaises(wifi.WifiFailure) as raised:
+                wifi._verify_connection_commit(FakeNmcli(), "wlan0", "wlan1")
+        self.assertEqual(raised.exception.code, "UNKNOWN")
+
+    def test_parallel_pins_address_conflict_suspends_managed_ap_and_retries(self):
+        nm = FakeNmcli()
+        failed = (
+            subprocess.CompletedProcess([], 1),
+            "PINS_WIFI_VIABILITY status=unhealthy mode=pins-peer "
+            "reason=dhcp_server_is_local_address:10.42.0.1",
+        )
+        healthy = (
+            subprocess.CompletedProcess([], 0),
+            "PINS_WIFI_VIABILITY status=healthy mode=pins-peer "
+            "reason=peer_identity_confirmed",
+        )
+        with patch.object(
+            wifi, "_run_viability_check", side_effect=[failed, healthy]
+        ) as check, patch.object(
+            wifi, "_deactivate_parallel_pins_hotspot", return_value=True
+        ) as deactivate:
+            wifi._verify_connection_commit(nm, "wlan0", "wlan1")
+
+        self.assertEqual(check.call_count, 2)
+        deactivate.assert_called_once_with(nm, "wlan0", "wlan1", "10.42.0.1")
+
+    def test_only_managed_ap_owning_conflicting_address_is_suspended(self):
+        address = wifi.CommandResult(0, "10.42.0.1/24\n")
+        active = wifi.CommandResult(0, "ap-uuid:802-11-wireless:wlan1\n")
+        nm = FakeNmcli([address, active])
+        with patch.object(wifi, "_profile_value", side_effect=["ap", "Hotspot"]):
+            self.assertTrue(
+                wifi._deactivate_parallel_pins_hotspot(
+                    nm, "wlan0", "wlan1", "10.42.0.1"
+                )
+            )
+        self.assertIn(
+            ["connection", "modify", "uuid", "ap-uuid", "connection.autoconnect", "no"],
+            nm.calls,
+        )
+        self.assertIn(["connection", "down", "uuid", "ap-uuid"], nm.calls)
+
+        other_interface_address = FakeNmcli(
+            [wifi.CommandResult(0, "192.168.1.10/24\n")]
+        )
+        self.assertFalse(
+            wifi._deactivate_parallel_pins_hotspot(
+                other_interface_address, "wlan0", "wlan1", "10.42.0.1"
+            )
+        )
+        self.assertFalse(
+            any(call[:2] == ["connection", "down"] for call in other_interface_address.calls)
+        )
+
+
 class SavedProfileTests(unittest.TestCase):
     def test_saved_profile_with_no_secret_fails_before_activation(self):
         nm = FakeNmcli()
@@ -131,7 +248,9 @@ class SavedProfileTests(unittest.TestCase):
         nm = FakeNmcli([wifi.CommandResult(0)])
         with patch.object(wifi, "_load_config", return_value={"client_profile_uuid": "saved"}), patch.object(
             wifi, "_find_saved_profile", return_value="saved"
-        ), patch.object(wifi, "_activate") as activate, patch.object(wifi, "_persist_success"):
+        ), patch.object(wifi, "_activate") as activate, patch.object(
+            wifi, "_verify_connection_commit"
+        ), patch.object(wifi, "_persist_success"):
             self.assertEqual(wifi.connect(args, "", nm), "saved")
         activate.assert_called_once_with(nm, "saved", "wlan0", False)
         self.assertIn(
@@ -147,7 +266,9 @@ class SavedProfileTests(unittest.TestCase):
         nm = FakeNmcli([wifi.CommandResult(0)])
         with patch.object(wifi, "_load_config", return_value={"client_profile_uuid": "saved"}), patch.object(
             wifi, "_find_saved_profile", return_value="saved"
-        ), patch.object(wifi, "_activate"), patch.object(wifi, "_persist_success"):
+        ), patch.object(wifi, "_activate"), patch.object(
+            wifi, "_verify_connection_commit"
+        ), patch.object(wifi, "_persist_success"):
             self.assertEqual(wifi.connect(args, "", nm), "saved")
         self.assertIn(
             ["connection", "modify", "uuid", "saved", "connection.autoconnect", "no"],
@@ -186,10 +307,13 @@ class TransactionTests(unittest.TestCase):
             nm = FakeNmcli([wifi.CommandResult(0)])
             with patch.object(wifi, "_scan_security", return_value="WPA2"), patch.object(
                 wifi, "_create_profile"
-            ), patch.object(wifi, "_activate"), patch.object(wifi, "_delete_profile"), patch.object(
+            ), patch.object(wifi, "_activate"), patch.object(
+                wifi, "_verify_connection_commit"
+            ) as verify, patch.object(wifi, "_delete_profile"), patch.object(
                 wifi, "_wifi_profile_uuids", return_value=[]
             ):
                 profile_uuid = wifi.connect(args, "valid-password", nm)
+            self.assertEqual(verify.call_count, 2)
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(saved["client_profile_uuid"], profile_uuid)
             self.assertEqual(saved["hotspot_interface"], "wlan1")

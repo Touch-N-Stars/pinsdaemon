@@ -71,7 +71,7 @@ graph TD
   WifiObserver -->|Persist manual client hand-off only| WifiConfig[(wifi_config.json)]
 
   Timer[pins-wifi-watchdog.timer, every 10s] --> Watchdog[pins-wifi-watchdog.sh]
-  Watchdog -->|Ping gateway; fallback after N failures| WifiConnect
+  Watchdog -->|Validate gateway or local PINS peer; fallback after N failures| WifiConnect
 ```
 
 The daemon provides a facade over system shell scripts. Long-running tasks (like upgrades or Wi-Fi connections) are executed asynchronously as "Jobs". Clients receive a `Job ID` immediately and can use it to poll status or stream logs via WebSockets.
@@ -106,7 +106,8 @@ the same token in its `?token=` query parameter.
 
 This endpoint deliberately exposes only stable rig identity and compatibility
 information. Touch-N-Stars uses it to reject a reachable endpoint belonging to a
-different rig while recovering from Wi-Fi changes.
+different rig while recovering from Wi-Fi changes, and the Wi-Fi validator uses
+the same identity contract for local-only PINS-to-PINS connections.
 
 ### 1. System Upgrade
 
@@ -236,8 +237,8 @@ Runtime behavior:
 - NetworkManager is the only durable owner of client credentials. The password is transported to the privileged connection job over stdin, is never written to `wifi_config.json`, and is not included in job commands or logs.
 - New client profiles use deterministic PINS connection IDs and UUIDs. Automatic recovery activates the saved UUID only; it never retries a secured network without a stored NetworkManager secret.
 - `wifi_config.json` is updated atomically only after the requested profile is active on the selected client interface and has an IPv4 address. A failed request keeps the previous desired network and rolls back to the hotspot.
-- With two Wi-Fi adapters, the internal adapter remains the default client and the optional second adapter hosts the hotspot. With one adapter, the hotspot is stopped before the client attempt and restored on failure.
-- `pins-wifi-watchdog.timer` runs `pins-wifi-watchdog.sh` every 10s to actively ping the client interface's default gateway. After 3 consecutive failed checks (~30 seconds) it forces the fallback hotspot. A failed hotspot activation rebuilds the complete failure window before retrying, preventing NetworkManager event storms.
+- With two Wi-Fi adapters, the internal adapter remains the default client and the optional second adapter hosts the hotspot while using ordinary gateway-based home Wi-Fi. With one adapter, the hotspot is stopped before the client attempt and restored on failure. When one PINS rig joins another PINS hotspot, its own managed AP is temporarily suspended because both field hotspots use `10.42.0.1/24`.
+- `pins-wifi-watchdog.timer` runs `pins-wifi-watchdog.sh` every 10s. Networks advertising a default gateway keep the existing gateway-ping path. A gatewayless network is healthy only when NetworkManager reports an active infrastructure profile with IPv4, identifies an on-link DHCP server, and `http://<DHCP-server>:8000/health` returns the same valid, non-local PINS identity on consecutive checks. The short probe never uses the API secret. After 3 consecutive failed checks (~30 seconds), including loss of a verified peer, it forces the fallback hotspot. A failed hotspot activation rebuilds the complete failure window before retrying, preventing NetworkManager event storms.
 - The dispatcher, watchdog, and manual/API Wi-Fi connection path share `/run/pins-wifi-coordination.lock`. The dispatcher only serializes its atomic mode-file hand-off; all NetworkManager mutations are owned by the watchdog or the manual/API path.
 - Hotspot profiles are fully configured before their first activation, avoiding a dnsmasq teardown/reactivation race. The local-only hotspot's dnsmasq is DHCP-only (`port=0`), so an existing DNS listener on port 53 cannot prevent AP activation; mDNS remains available through Avahi.
 - Wi-Fi roles are determined from the active NetworkManager profile's `802-11-wireless.mode`, never from an SSID or profile-name prefix such as `pins-`.
@@ -254,7 +255,7 @@ Runtime behavior:
     "band": "2.4GHz"
   }
   ```
-- **Response**: `JobResponse` object. Completed failed jobs may additionally contain `errorCode` and `errorMessage`; Wi-Fi codes include `MISSING_CREDENTIALS`, `INVALID_CREDENTIALS`, `NETWORK_NOT_FOUND`, `PROFILE_NOT_FOUND`, `ASSOCIATION_FAILED`, `IP_CONFIGURATION_FAILED`, `INTERFACE_UNAVAILABLE`, `HOTSPOT_SWITCH_FAILED`, and `UNKNOWN`.
+- **Response**: `JobResponse` object. Completed failed jobs may additionally contain `errorCode` and `errorMessage`; Wi-Fi codes include `MISSING_CREDENTIALS`, `INVALID_CREDENTIALS`, `NETWORK_NOT_FOUND`, `PROFILE_NOT_FOUND`, `ASSOCIATION_FAILED`, `IP_CONFIGURATION_FAILED`, `GATEWAY_UNREACHABLE`, `INTERFACE_UNAVAILABLE`, `HOTSPOT_SWITCH_FAILED`, and `UNKNOWN`.
 
 ### 7. Wi-Fi Disable (Force Hotspot)
 
@@ -597,7 +598,7 @@ The ZIP contains selected troubleshooting data such as:
 - `lsusb`, `lsusb -t`, `usb-devices`
 - `dmesg` tail plus USB- and network-focused driver filters
 - NetworkManager device/profile state without connection secrets
-- IPv4/IPv6 addresses, every routing table and rule, neighbors, DNS state, firewall rules, listening socket owners, and recovery-lock state
+- IPv4/IPv6 addresses, every routing table and rule, neighbors, DNS state, firewall rules, listening socket owners, recovery-lock state, and the sanitized PINS-peer confirmation state
 - per-interface carrier/operational state, driver identity, counters, `ethtool` statistics, and Wi-Fi link information
 - process/resource summaries without command-line arguments, failed units, timers, package versions, and installed network-script hashes
 - basic system details (`uname`, `os-release`, `timedatectl`, service status)

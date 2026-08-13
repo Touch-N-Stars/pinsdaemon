@@ -90,6 +90,22 @@ class WifiModeHelpersTests(unittest.TestCase):
 
 
 class WifiModeApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_identity_contract_is_unauthenticated(self):
+        with patch.dict("os.environ", {"PINS_RIG_ID": "pins-peer-test"}):
+            response = await main.health()
+
+        self.assertEqual(
+            response.model_dump(),
+            {
+                "status": "ok",
+                "service": "pinsdaemon",
+                "rigId": "pins-peer-test",
+                "apiVersion": 2,
+            },
+        )
+        route = next(route for route in main.app.routes if route.path == "/health")
+        self.assertEqual(route.dependant.dependencies, [])
+
     async def test_set_hotspot_mode_persists_intent_before_starting_job(self):
         fake_job = SimpleNamespace(
             id="job-1",

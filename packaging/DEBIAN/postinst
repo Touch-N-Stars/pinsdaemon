@@ -75,6 +75,11 @@ if [ -f "/usr/local/bin/pins-wifi-profile.py" ]; then
     chmod 755 /usr/local/bin/pins-wifi-profile.py
 fi
 
+if [ -f "/usr/local/bin/pins-wifi-viability.py" ]; then
+    chown root:root /usr/local/bin/pins-wifi-viability.py
+    chmod 755 /usr/local/bin/pins-wifi-viability.py
+fi
+
 if [ -f "/usr/local/bin/pins-rig-name" ]; then
     chown root:root /usr/local/bin/pins-rig-name
     chmod 755 /usr/local/bin/pins-rig-name
