@@ -458,7 +458,28 @@ Alias endpoint for the same update behavior:
   }
   ```
 
-### 13. System Time
+### 13. System Power Status
+
+- **URL**: `GET /system/power-status`
+- **Behavior**: Reads `vcgencmd get_throttled` and caches the result for five minutes. On Raspberry Pi 5, `supplyVoltage` contains the measured 5V input rail; it is `null` on models without the `EXT5V_V` PMIC ADC.
+- **Response**:
+  ```json
+  {
+    "supplyVoltage": 5.09,
+    "underVoltage": false,
+    "underVoltageOccurred": false,
+    "throttled": false,
+    "throttlingOccurred": false,
+    "armFrequencyCapped": false,
+    "armFrequencyCappingOccurred": false,
+    "softTemperatureLimit": false,
+    "softTemperatureLimitOccurred": false,
+    "rawValue": "0x0",
+    "source": "vcgencmd"
+  }
+  ```
+
+### 14. System Time
 
 - **URL**: `GET /system/time`
 - **Response**:
@@ -479,7 +500,7 @@ Alias endpoint for the same update behavior:
   ```
 - **Response**: `JobResponse` object.
 
-### 14. System Localization
+### 15. System Localization
 
 Read the values currently configured on the host:
 
@@ -606,7 +627,7 @@ The ZIP contains selected troubleshooting data such as:
 The collector deliberately excludes NetworkManager secrets, hotspot passwords,
 process command-line arguments, and the daemon API token.
 
-### 15. Check Updates
+### 16. Check Updates
 
 Check whether updates are available for a whitelist of relevant packages.
 The daemon reads installed versions locally and compares them against the configured APT Packages index.
@@ -653,7 +674,7 @@ accept:
 Mutating operations return a `JobResponse`. Protected core packages and names
 outside the daemon allowlist cannot be removed through these endpoints.
 
-### 16. Indi3rdparty Packages
+### 17. Indi3rdparty Packages
 
 List available packages from the latest GitHub release of:
 `https://github.com/acocalypso/indi3rdparty/releases/latest`
@@ -742,7 +763,7 @@ Edit one registry entry by driver name. You can rename it (`Name`), relabel (`La
   - `INDI_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-indi-package.sh`)
   - `INDI_3RDPARTY_JSON_PATH` (default: `/home/pi/Documents/INDI/3rdparty.json`)
 
-### 17. ASTAP Star Databases
+### 18. ASTAP Star Databases
 
 List installable ASTAP star databases for Raspberry Pi 64-bit.
 Supported selections: `D50`, `D05`, `G05`, `W08`.
@@ -785,7 +806,7 @@ Install one ASTAP star database.
   - `ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-astap-star-database.sh`)
   - `ASTAP_STAR_DATABASE_STATE_FILE` (default: `/opt/pinsdaemon/astap-star-databases.json`)
 
-### 18. Job Status
+### 19. Job Status
 
 Check the status of a background job.
 
@@ -797,7 +818,7 @@ job, whichever started later. General runtime jobs and their captured logs are
 held in memory and do not survive a daemon restart; the last upgrade job is the
 documented persistence exception.
 
-### 19. Job Logs (WebSocket)
+### 20. Job Logs (WebSocket)
 
 Stream live logs from a running job.
 

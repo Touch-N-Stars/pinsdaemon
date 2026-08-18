@@ -96,6 +96,8 @@ STARTUP_PACKAGE_CHECK_ENABLED = os.getenv("STARTUP_PACKAGE_CHECK_ENABLED", "true
 STARTUP_WIFI_AUTOMANAGE_ENABLED = os.getenv("STARTUP_WIFI_AUTOMANAGE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 STARTUP_WIFI_AUTOMANAGE_ATTEMPTS = max(1, int(os.getenv("STARTUP_WIFI_AUTOMANAGE_ATTEMPTS", "3")))
 STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS = max(0.0, float(os.getenv("STARTUP_WIFI_AUTOMANAGE_DELAY_SECONDS", "5")))
+VCGENCMD_PATH = os.getenv("VCGENCMD_PATH", "/usr/bin/vcgencmd")
+POWER_STATUS_CACHE_SECONDS = max(1.0, float(os.getenv("POWER_STATUS_CACHE_SECONDS", "300")))
 FIRMWARE_STATE_FILE = os.getenv("FIRMWARE_STATE_FILE", "/opt/pinsdaemon/firmware.txt")
 FIRMWARE_UPLOAD_DIR = os.getenv("FIRMWARE_UPLOAD_DIR", "/tmp/pinsdaemon-firmware")
 FIRMWARE_ZIP_RE = re.compile(r"^firmware_(\d{8})_(\d{6})\.zip$", re.IGNORECASE)
@@ -1191,6 +1193,21 @@ class PiTemperatureResponse(BaseModel):
     celsius: float
     fahrenheit: float
     source: str
+
+
+class PowerStatusResponse(BaseModel):
+    supplyVoltage: Optional[float] = None
+    underVoltage: bool
+    underVoltageOccurred: bool
+    throttled: bool
+    throttlingOccurred: bool
+    armFrequencyCapped: bool
+    armFrequencyCappingOccurred: bool
+    softTemperatureLimit: bool
+    softTemperatureLimitOccurred: bool
+    rawValue: str
+    source: str = "vcgencmd"
+
 
 class JobResponse(BaseModel):
 
@@ -2909,6 +2926,92 @@ async def update_system_localization(request: SystemLocalizationUpdateRequest):
     return _job_response_from_runtime_job(job)
 
 
+_power_status_cache: tuple[float, Optional[PowerStatusResponse]] = (0.0, None)
+_power_status_lock = asyncio.Lock()
+
+
+async def _capture_vcgencmd(*arguments: str) -> Optional[str]:
+    commands = [
+        ["sudo", "-n", VCGENCMD_PATH, *arguments],
+        [VCGENCMD_PATH, *arguments],
+    ]
+    for command in commands:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode == 0:
+                return stdout.decode(errors="replace").strip()
+        except (FileNotFoundError, PermissionError):
+            continue
+    return None
+
+
+def _parse_throttled_value(output: str) -> int:
+    match = re.fullmatch(r"throttled=0x([0-9a-fA-F]+)", output.strip())
+    if not match:
+        raise ValueError("Unexpected vcgencmd get_throttled output")
+    return int(match.group(1), 16)
+
+
+def _parse_supply_voltage(output: Optional[str]) -> Optional[float]:
+    if not output:
+        return None
+    match = re.search(r"EXT5V_V\s+volt\(\d+\)=([0-9]+(?:\.[0-9]+)?)V", output)
+    return float(match.group(1)) if match else None
+
+
+async def _read_power_status() -> PowerStatusResponse:
+    throttled_output = await _capture_vcgencmd("get_throttled")
+    if not throttled_output:
+        raise HTTPException(status_code=500, detail="Unable to read system power status")
+
+    try:
+        flags = _parse_throttled_value(throttled_output)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # EXT5V_V is available on Raspberry Pi 5. Older models still provide the
+    # undervoltage flags, so a missing ADC value is intentionally non-fatal.
+    voltage_output = await _capture_vcgencmd("pmic_read_adc", "EXT5V_V")
+    return PowerStatusResponse(
+        supplyVoltage=_parse_supply_voltage(voltage_output),
+        underVoltage=bool(flags & (1 << 0)),
+        armFrequencyCapped=bool(flags & (1 << 1)),
+        throttled=bool(flags & (1 << 2)),
+        softTemperatureLimit=bool(flags & (1 << 3)),
+        underVoltageOccurred=bool(flags & (1 << 16)),
+        armFrequencyCappingOccurred=bool(flags & (1 << 17)),
+        throttlingOccurred=bool(flags & (1 << 18)),
+        softTemperatureLimitOccurred=bool(flags & (1 << 19)),
+        rawValue=f"0x{flags:x}",
+    )
+
+
+@app.get("/system/power-status", response_model=PowerStatusResponse, dependencies=[Depends(verify_token)])
+async def get_system_power_status():
+    """Return cached Raspberry Pi input-voltage and firmware throttling status."""
+    global _power_status_cache
+
+    now = time.monotonic()
+    cached_at, cached_status = _power_status_cache
+    if cached_status is not None and now - cached_at < POWER_STATUS_CACHE_SECONDS:
+        return cached_status
+
+    async with _power_status_lock:
+        now = time.monotonic()
+        cached_at, cached_status = _power_status_cache
+        if cached_status is not None and now - cached_at < POWER_STATUS_CACHE_SECONDS:
+            return cached_status
+
+        status = await _read_power_status()
+        _power_status_cache = (now, status)
+        return status
+
+
 @app.get("/system/temperature", response_model=PiTemperatureResponse, dependencies=[Depends(verify_token)])
 async def get_system_temperature():
     """
@@ -2916,14 +3019,8 @@ async def get_system_temperature():
     """
     # Try vcgencmd first (common on Raspberry Pi OS)
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "vcgencmd", "measure_temp",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode == 0:
-            output = stdout.decode().strip()
+        output = await _capture_vcgencmd("measure_temp")
+        if output:
             # Expected format: temp=48.7'C
             match = re.search(r"temp=([0-9]+(?:\.[0-9]+)?)", output)
             if match:

@@ -38,4 +38,7 @@ sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/NetworkManager/dnsmasq-
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/misc/dnsmasq.leases
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/cat /home/pi/Documents/INDI/3rdparty.json
 sysupdate-api ALL=(root) NOPASSWD: /usr/bin/tee /home/pi/Documents/INDI/3rdparty.json
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/vcgencmd get_throttled
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/vcgencmd measure_temp
+sysupdate-api ALL=(root) NOPASSWD: /usr/bin/vcgencmd pmic_read_adc EXT5V_V
 
