@@ -247,6 +247,48 @@ def _viability_succeeded(
     )
 
 
+def _interface_has_default_gateway(interface: str) -> bool:
+    """Compatibility guard for mixed-version packages.
+
+    A normal router connection must not be rejected merely because the
+    separately packaged viability helper is unavailable.  Gatewayless
+    connections deliberately fail closed because only that helper can verify
+    a remote PINS identity.
+    """
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "route", "show", "default", "dev", interface],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "default" or "via" not in fields:
+            continue
+        try:
+            ipaddress.IPv4Address(fields[fields.index("via") + 1])
+        except (ValueError, IndexError):
+            continue
+        return True
+    return False
+
+
+def _accept_gateway_compatibility_fallback(interface: str) -> bool:
+    if not _interface_has_default_gateway(interface):
+        return False
+    print(
+        "PINS_WIFI_VIABILITY status=healthy mode=gateway "
+        "reason=compatibility_fallback"
+    )
+    return True
+
+
 def _deactivate_parallel_pins_hotspot(
     nm: Nmcli,
     client_interface: str,
@@ -335,7 +377,12 @@ def _verify_connection_commit(
     try:
         result, safe_output = _run_viability_check(interface)
     except (OSError, subprocess.TimeoutExpired):
-        raise WifiFailure("UNKNOWN", "Wi-Fi_viability_checker_is_unavailable")
+        if _accept_gateway_compatibility_fallback(interface):
+            return
+        raise WifiFailure(
+            "GATEWAY_UNREACHABLE",
+            "Client_without_gateway_requires_a_verified_PINS_peer",
+        )
 
     local_address_match = re.search(
         r"(?:^| )reason=dhcp_server_is_local_address:([0-9.]+)(?: |$)",
@@ -352,15 +399,21 @@ def _verify_connection_commit(
         try:
             result, safe_output = _run_viability_check(interface)
         except (OSError, subprocess.TimeoutExpired):
-            raise WifiFailure("UNKNOWN", "Wi-Fi_viability_checker_is_unavailable")
+            if _accept_gateway_compatibility_fallback(interface):
+                return
+            raise WifiFailure(
+                "GATEWAY_UNREACHABLE",
+                "Client_without_gateway_requires_a_verified_PINS_peer",
+            )
 
-    if result.returncode == 0 and not _viability_succeeded(result, safe_output):
-        raise WifiFailure("UNKNOWN", "Wi-Fi_viability_checker_returned_invalid_output")
-    if result.returncode != 0:
-        raise WifiFailure(
-            "GATEWAY_UNREACHABLE",
-            "Client_without_gateway_requires_a_verified_PINS_peer",
-        )
+    if _viability_succeeded(result, safe_output):
+        return
+    if _accept_gateway_compatibility_fallback(interface):
+        return
+    raise WifiFailure(
+        "GATEWAY_UNREACHABLE",
+        "Client_without_gateway_requires_a_verified_PINS_peer",
+    )
 
 
 def _delete_profile(nm: Nmcli, profile_uuid: str) -> None:

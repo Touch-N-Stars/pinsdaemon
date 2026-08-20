@@ -126,6 +126,18 @@ clear_peer_state() {
     rm -f -- "$PEER_STATE_FILE" 2>/dev/null || true
 }
 
+# Keep ordinary router Wi-Fi operational across a temporarily mixed package
+# installation where the profile/watchdog scripts have been upgraded but the
+# separately packaged viability helper is absent. Gatewayless PINS-to-PINS
+# links still require the helper and therefore fail closed.
+legacy_gateway_reachable() {
+    local gateway
+    gateway="$(ip -4 route show default dev "$CLIENT_IFACE" 2>/dev/null \
+        | awk '$1 == "default" && $2 == "via" { print $3; exit }')"
+    [[ -n "$gateway" ]] || return 1
+    ping -I "$CLIENT_IFACE" -c 1 -W "$PING_TIMEOUT_SECONDS" "$gateway" >/dev/null 2>&1
+}
+
 is_hotspot_active() {
     while IFS=: read -r profile_uuid profile_type profile_iface; do
         [[ "$profile_type" == "802-11-wireless" && "$profile_iface" == "$HOTSPOT_IFACE" ]] || continue
@@ -216,6 +228,13 @@ if [[ "$VIABILITY_RC" -eq 0 ]]; then
             VIABILITY_HEALTHY=true
             ;;
     esac
+fi
+
+if [[ "$VIABILITY_HEALTHY" != true ]] && legacy_gateway_reachable; then
+    VIABILITY_HEALTHY=true
+    VIABILITY_MODE="gateway"
+    VIABILITY_REASON="compatibility_fallback"
+    clear_peer_state
 fi
 
 if [[ "$VIABILITY_HEALTHY" == true ]]; then

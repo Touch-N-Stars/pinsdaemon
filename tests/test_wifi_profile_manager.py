@@ -77,6 +77,25 @@ class WifiProfileIdentityTests(unittest.TestCase):
 
 
 class ConnectionViabilityTests(unittest.TestCase):
+    def test_compatibility_gateway_probe_requires_a_valid_via_route(self):
+        valid = subprocess.CompletedProcess(
+            [], 0, "default via 192.168.1.1 proto dhcp metric 600\n", ""
+        )
+        with patch.object(wifi.subprocess, "run", return_value=valid) as run:
+            self.assertTrue(wifi._interface_has_default_gateway("wlan0"))
+        self.assertEqual(
+            run.call_args.args[0],
+            ["ip", "-4", "route", "show", "default", "dev", "wlan0"],
+        )
+
+        for output in ("default dev wlan0 scope link\n", "default via invalid\n", ""):
+            with self.subTest(output=output), patch.object(
+                wifi.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, output, ""),
+            ):
+                self.assertFalse(wifi._interface_has_default_gateway("wlan0"))
+
     def test_helper_invocation_is_bounded_and_contains_no_secret(self):
         completed = subprocess.CompletedProcess(
             [],
@@ -136,10 +155,33 @@ class ConnectionViabilityTests(unittest.TestCase):
                 subprocess.CompletedProcess([], 0),
                 "PINS_WIFI_VIABILITY status=healthy mode=unknown reason=unexpected",
             ),
-        ):
+        ), patch.object(wifi, "_interface_has_default_gateway", return_value=False):
             with self.assertRaises(wifi.WifiFailure) as raised:
                 wifi._verify_connection_commit(FakeNmcli(), "wlan0", "wlan1")
-        self.assertEqual(raised.exception.code, "UNKNOWN")
+        self.assertEqual(raised.exception.code, "GATEWAY_UNREACHABLE")
+
+    def test_missing_helper_accepts_only_a_normal_gateway_connection(self):
+        with patch.object(
+            wifi, "_run_viability_check", side_effect=FileNotFoundError
+        ), patch.object(wifi, "_interface_has_default_gateway", return_value=True):
+            wifi._verify_connection_commit(FakeNmcli(), "wlan0", "wlan0")
+
+        with patch.object(
+            wifi, "_run_viability_check", side_effect=FileNotFoundError
+        ), patch.object(wifi, "_interface_has_default_gateway", return_value=False):
+            with self.assertRaises(wifi.WifiFailure) as raised:
+                wifi._verify_connection_commit(FakeNmcli(), "wlan0", "wlan0")
+        self.assertEqual(raised.exception.code, "GATEWAY_UNREACHABLE")
+
+    def test_invalid_helper_output_can_only_fall_back_to_a_default_gateway(self):
+        invalid = (
+            subprocess.CompletedProcess([], 0),
+            "PINS_WIFI_VIABILITY status=healthy mode=unknown reason=unexpected",
+        )
+        with patch.object(
+            wifi, "_run_viability_check", return_value=invalid
+        ), patch.object(wifi, "_interface_has_default_gateway", return_value=True):
+            wifi._verify_connection_commit(FakeNmcli(), "wlan0", "wlan0")
 
     def test_parallel_pins_address_conflict_suspends_managed_ap_and_retries(self):
         nm = FakeNmcli()
