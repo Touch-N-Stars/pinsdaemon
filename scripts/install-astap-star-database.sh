@@ -129,4 +129,16 @@ with open(tmp_file, "w", encoding="utf-8") as f:
 os.replace(tmp_file, state_file)
 PY
 
+LINK_SCRIPT="/usr/local/bin/ensure-astap-data-links.sh"
+if [[ ! -x "$LINK_SCRIPT" ]]; then
+    LINK_SCRIPT="$(dirname "$0")/ensure-astap-data-links.sh"
+fi
+
+if [[ -x "$LINK_SCRIPT" ]]; then
+    echo "Making ASTAP database files visible to the command-line application..."
+    "$LINK_SCRIPT"
+else
+    echo "Warning: ASTAP data-link helper was not found; links will be repaired when pinsdaemon next starts."
+fi
+
 echo "ASTAP star database ${DATABASE_ID} is ready."
