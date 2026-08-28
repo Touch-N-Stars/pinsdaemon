@@ -64,28 +64,93 @@ class LocalizationApiTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             locale_file = Path(temp_dir) / "locale"
             keyboard_file = Path(temp_dir) / "keyboard"
+            cmdline_file = Path(temp_dir) / "cmdline.txt"
             locale_file.write_text('LANG="en_GB.UTF-8"\n', encoding="utf-8")
             keyboard_file.write_text('XKBLAYOUT="de"\n', encoding="utf-8")
+            cmdline_file.write_text(
+                "root=/dev/mmcblk0p2 cfg80211.ieee80211_regdom=DE\n",
+                encoding="utf-8",
+            )
 
             async def capture(*command, **_kwargs):
                 if command[0] == "timedatectl":
                     return "Europe/Berlin"
+                if command[0] == "iw":
+                    return "global\ncountry DE: DFS-ETSI\n\nphy#0\ncountry 99: DFS-UNSET"
                 return "DE"
 
             with patch.object(main, "DEFAULT_LOCALE_PATH", str(locale_file)):
                 with patch.object(main, "DEFAULT_KEYBOARD_PATH", str(keyboard_file)):
-                    with patch.object(main, "_capture_localization_command", side_effect=capture):
-                        result = await main._read_system_localization()
+                    with patch.dict(
+                        main.os.environ,
+                        {"PINS_WIFI_CMDLINE_PATH": str(cmdline_file)},
+                    ):
+                        with patch.object(main, "_capture_localization_command", side_effect=capture):
+                            result = await main._read_system_localization()
 
         self.assertEqual(
             result.model_dump(),
             {
                 "locale": "en_GB.UTF-8",
                 "wifiCountry": "DE",
+                "wifiCountryPersistent": "DE",
+                "wifiCountryBoot": "DE",
+                "wifiCountryRuntime": "DE",
+                "wifiCountryConsistent": True,
                 "timezone": "Europe/Berlin",
                 "keyboardLayout": "de",
             },
         )
+
+    async def test_status_exposes_persistent_boot_runtime_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cmdline_file = Path(temp_dir) / "cmdline.txt"
+            cmdline_file.write_text(
+                "root=/dev/x cfg80211.ieee80211_regdom=DE\n", encoding="utf-8"
+            )
+
+            async def capture(*command, **_kwargs):
+                if command[0] == "raspi-config":
+                    return "US"
+                if command[0] == "iw":
+                    return "global\ncountry DE: DFS-ETSI\n"
+                return "America/Phoenix"
+
+            with patch.dict(
+                main.os.environ, {"PINS_WIFI_CMDLINE_PATH": str(cmdline_file)}
+            ), patch.object(
+                main, "_capture_localization_command", side_effect=capture
+            ):
+                result = await main._read_system_localization()
+
+        self.assertEqual(result.wifiCountry, "US")
+        self.assertEqual(result.wifiCountryPersistent, "US")
+        self.assertEqual(result.wifiCountryBoot, "DE")
+        self.assertEqual(result.wifiCountryRuntime, "DE")
+        self.assertFalse(result.wifiCountryConsistent)
+
+    async def test_missing_country_does_not_default_to_de_or_us(self):
+        async def capture(*_command, **_kwargs):
+            return None
+
+        with patch.object(main, "_capture_localization_command", side_effect=capture):
+            result = await main._read_system_localization()
+        self.assertIsNone(result.wifiCountry)
+        self.assertFalse(result.wifiCountryConsistent)
+
+    def test_privileged_helper_uses_verified_regulatory_module(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "build-deb.yml"
+        ).read_text(encoding="utf-8")
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "manage-localization.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("-m app.wifi_regulatory", source)
+        self.assertNotIn("CURRENT_WIFI_COUNTRY=", source)
+        self.assertIn("./opt/pinsdaemon/app/wifi_regulatory.py", workflow)
 
     async def test_update_validates_options_and_starts_allowlisted_job(self):
         fake_job = SimpleNamespace(

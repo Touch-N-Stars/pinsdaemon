@@ -136,6 +136,38 @@ collect_recovery_state() {
     fi
 }
 
+collect_regulatory_state() {
+    local configured=""
+    local boot_values=""
+    local runtime=""
+    local cmdline_path=""
+    local consistent="no"
+
+    configured="$(/usr/bin/raspi-config nonint get_wifi_country 2>/dev/null || true)"
+    if [ -r /boot/firmware/cmdline.txt ]; then
+        cmdline_path=/boot/firmware/cmdline.txt
+    elif [ -r /boot/cmdline.txt ]; then
+        cmdline_path=/boot/cmdline.txt
+    fi
+    if [ -n "$cmdline_path" ]; then
+        boot_values="$(grep -o 'cfg80211\.ieee80211_regdom=[^[:space:]]*' "$cmdline_path" 2>/dev/null \
+            | sed 's/^cfg80211\.ieee80211_regdom=//' | paste -sd, -)"
+    fi
+    runtime="$(iw reg get 2>/dev/null \
+        | awk '$0 == "global" { global=1; next } global && /^country [A-Z][A-Z]:/ { sub(/^country /, ""); sub(/:.*/, ""); print; exit }')"
+    if [ -n "$configured" ] && [ "$configured" = "$boot_values" ] \
+        && [ "$configured" = "$runtime" ]; then
+        consistent=yes
+    fi
+
+    printf '%s\n' 'Wi-Fi regulatory configuration'
+    printf '%s\n' '-------------------------------'
+    printf 'Configured country: %s\n' "${configured:-unconfigured}"
+    printf 'Boot regdom:        %s\n' "${boot_values:-unconfigured}"
+    printf 'Runtime country:    %s\n' "${runtime:-unconfigured}"
+    printf 'Consistent:         %s\n' "$consistent"
+}
+
 cat >"$OUTPUT_DIR/manifest.txt" <<EOF
 diagnostics_schema=2
 collected_at=$(date --iso-8601=seconds)
@@ -262,6 +294,7 @@ if [ "$INCLUDE_NETWORK_INFO" -eq 1 ]; then
     run_command "$OUTPUT_DIR/network/rfkill.txt" rfkill list
     run_command "$OUTPUT_DIR/network/iw-dev.txt" iw dev
     run_command "$OUTPUT_DIR/network/iw-regulatory-domain.txt" iw reg get
+    run_command "$OUTPUT_DIR/network/wifi-regulatory-configuration.txt" collect_regulatory_state
     run_command "$OUTPUT_DIR/network/iw-capabilities.txt" iw list
     run_shell "$OUTPUT_DIR/network/resolver-status.txt" "if command -v resolvectl >/dev/null 2>&1; then resolvectl status; elif command -v systemd-resolve >/dev/null 2>&1; then systemd-resolve --status; else echo 'resolver status command unavailable'; fi"
     run_command "$OUTPUT_DIR/network/resolv-conf.txt" cat /etc/resolv.conf

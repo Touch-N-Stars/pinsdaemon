@@ -114,6 +114,7 @@ jobs:
       run: |
         dpkg-deb --root-owner-group --build build ${{ steps.version.outputs.filename }}
         dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './usr/local/bin/pins-wifi-viability.py'
+        dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './opt/pinsdaemon/app/wifi_regulatory.py'
         
     - name: Upload Artifact
       uses: actions/upload-artifact@v4

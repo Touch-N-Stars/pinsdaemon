@@ -9,6 +9,8 @@ WIFI_COUNTRY_VALUE=""
 TIMEZONE_VALUE=""
 KEYBOARD_LAYOUT_VALUE=""
 HAS_VALUE=0
+WIFI_REGULATORY_PYTHON="${PINS_WIFI_REGULATORY_PYTHON:-/opt/pinsdaemon/venv/bin/python}"
+WIFI_REGULATORY_MODULE_ROOT="${PINS_WIFI_REGULATORY_MODULE_ROOT:-/opt/pinsdaemon}"
 
 fail() {
     printf 'Localization error: %s\n' "$1" >&2
@@ -108,13 +110,14 @@ if [ -n "$KEYBOARD_LAYOUT_VALUE" ]; then
 fi
 
 if [ -n "$WIFI_COUNTRY_VALUE" ]; then
-    CURRENT_WIFI_COUNTRY=$(/usr/bin/raspi-config nonint get_wifi_country 2>/dev/null || true)
-    if [ "$CURRENT_WIFI_COUNTRY" = "$WIFI_COUNTRY_VALUE" ]; then
-        printf 'Wi-Fi country already set to %s\n' "$WIFI_COUNTRY_VALUE"
-    else
-        printf 'Setting Wi-Fi country to %s\n' "$WIFI_COUNTRY_VALUE"
-        /usr/bin/raspi-config nonint do_wifi_country "$WIFI_COUNTRY_VALUE"
+    [ -x "$WIFI_REGULATORY_PYTHON" ] \
+        || fail "Wi-Fi regulatory Python runtime is unavailable"
+    set -- --country "$WIFI_COUNTRY_VALUE"
+    if [ -n "${PINS_WIFI_CMDLINE_PATH:-}" ]; then
+        set -- "$@" --cmdline-path "$PINS_WIFI_CMDLINE_PATH"
     fi
+    PYTHONPATH="$WIFI_REGULATORY_MODULE_ROOT" \
+        "$WIFI_REGULATORY_PYTHON" -m app.wifi_regulatory "$@"
 fi
 
 printf 'System localization update completed successfully.\n'

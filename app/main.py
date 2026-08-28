@@ -34,6 +34,13 @@ from .wifi_config import (
     save_wifi_config,
 )
 from .hotspot_config import load_hotspot_config, save_hotspot_settings
+from .wifi_regulatory import (
+    RegulatoryError,
+    find_cmdline_path,
+    normalize_country,
+    parse_runtime_country,
+    read_boot_countries,
+)
 
 install_stdio_tee()
 
@@ -305,6 +312,10 @@ class WifiInterfacesResponse(BaseModel):
 class SystemLocalizationStatusResponse(BaseModel):
     locale: Optional[str] = None
     wifiCountry: Optional[str] = None
+    wifiCountryPersistent: Optional[str] = None
+    wifiCountryBoot: Optional[str] = None
+    wifiCountryRuntime: Optional[str] = None
+    wifiCountryConsistent: bool = False
     timezone: Optional[str] = None
     keyboardLayout: Optional[str] = None
 
@@ -1118,16 +1129,46 @@ async def _capture_localization_command(*command: str, timeout: float = 10.0) ->
 
 
 async def _read_system_localization() -> SystemLocalizationStatusResponse:
-    timezone_value, wifi_country = await asyncio.gather(
+    timezone_value, configured_output, runtime_output = await asyncio.gather(
         _capture_localization_command("timedatectl", "show", "--property=Timezone", "--value"),
         _capture_localization_command("raspi-config", "nonint", "get_wifi_country"),
+        _capture_localization_command("iw", "reg", "get"),
+    )
+    configured_country = normalize_country(configured_output)
+    runtime_country = parse_runtime_country(runtime_output or "")
+    boot_values: list[str] = []
+    try:
+        boot_values = read_boot_countries(find_cmdline_path(os.getenv("PINS_WIFI_CMDLINE_PATH")))
+    except RegulatoryError:
+        pass
+    boot_country = boot_values[0] if len(boot_values) == 1 else None
+    country_consistent = bool(
+        configured_country
+        and boot_country == configured_country
+        and runtime_country == configured_country
+        and len(boot_values) == 1
     )
     return SystemLocalizationStatusResponse(
         locale=_read_shell_assignment(DEFAULT_LOCALE_PATH, "LANG"),
-        wifiCountry=wifi_country,
+        wifiCountry=configured_country,
+        wifiCountryPersistent=configured_country,
+        wifiCountryBoot=boot_country,
+        wifiCountryRuntime=runtime_country,
+        wifiCountryConsistent=country_consistent,
         timezone=timezone_value,
         keyboardLayout=_read_shell_assignment(DEFAULT_KEYBOARD_PATH, "XKBLAYOUT"),
     )
+
+
+async def _warn_wifi_country_mismatch_on_startup() -> None:
+    status = await _read_system_localization()
+    if status.wifiCountry and not status.wifiCountryConsistent:
+        print(
+            "Wi-Fi regulatory country mismatch: "
+            f"configured={status.wifiCountryPersistent or 'unconfigured'} "
+            f"boot={status.wifiCountryBoot or 'unconfigured-or-duplicate'} "
+            f"runtime={status.wifiCountryRuntime or 'unconfigured'}"
+        )
 
 
 async def _read_localization_options() -> SystemLocalizationOptionsResponse:
@@ -1878,6 +1919,7 @@ async def _run_wifi_automanage_on_startup() -> None:
 async def schedule_startup_tasks() -> None:
     asyncio.create_task(_ensure_required_packages_on_startup())
     asyncio.create_task(_run_wifi_automanage_on_startup())
+    asyncio.create_task(_warn_wifi_country_mismatch_on_startup())
 
 
 @app.get("/health", response_model=HealthResponse)

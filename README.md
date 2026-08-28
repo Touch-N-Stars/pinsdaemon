@@ -511,6 +511,10 @@ Read the values currently configured on the host:
   {
     "locale": "en_GB.UTF-8",
     "wifiCountry": "DE",
+    "wifiCountryPersistent": "DE",
+    "wifiCountryBoot": "DE",
+    "wifiCountryRuntime": "DE",
+    "wifiCountryConsistent": true,
     "timezone": "Europe/Berlin",
     "keyboardLayout": "de"
   }
@@ -533,7 +537,11 @@ Apply one or more settings asynchronously:
 
 The daemon validates every requested value against the host-provided option lists
 before starting the privileged job. The installer grants only the packaged
-`manage-localization.sh` command, which uses `raspi-config` and `timedatectl`.
+`manage-localization.sh` command. Wi-Fi country updates use the selected country
+as the source of truth, reconcile the Raspberry Pi kernel command-line regdom,
+apply the runtime regulatory domain, and report success only after all three
+states agree. The additional Wi-Fi country fields expose stale boot/runtime
+configuration without changing the backwards-compatible `wifiCountry` field.
 
 ### Diagnostics Archive
 
