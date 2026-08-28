@@ -292,7 +292,12 @@ def apply_country(
             "persistence and postcondition verification"
         )
 
-    reconcile_boot_country(cmdline_path, desired)
+    try:
+        reconcile_boot_country(cmdline_path, desired)
+    except OSError as exc:
+        raise RegulatoryError(
+            "boot regulatory configuration could not be persisted"
+        ) from exc
 
     runtime_set = _invoke(
         [iw_command, "reg", "set", desired], run_command=run_command

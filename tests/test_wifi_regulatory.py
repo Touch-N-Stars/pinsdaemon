@@ -232,6 +232,28 @@ class WifiRegulatoryTests(unittest.TestCase):
             self.assertEqual((result.configured, result.boot, result.runtime), ("US", "US", "US"))
             self.assertTrue(any("returned non-zero" in message for message in messages))
 
+    def test_boot_configuration_write_failure_is_reported_safely(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_cmdline(
+                directory, "root=/dev/x cfg80211.ieee80211_regdom=DE\n"
+            )
+            system = FakeRegulatorySystem(configured="DE", runtime="DE")
+
+            with patch.object(
+                self.module,
+                "reconcile_boot_country",
+                side_effect=OSError("simulated filesystem detail"),
+            ):
+                with self.assertRaisesRegex(
+                    self.module.RegulatoryError,
+                    "boot regulatory configuration could not be persisted",
+                ) as raised:
+                    self.module.apply_country(
+                        "US", path, run_command=system.run, sleep=lambda _seconds: None
+                    )
+
+            self.assertNotIn("simulated filesystem detail", str(raised.exception))
+
     def test_runtime_verification_failure_does_not_report_consistency(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_cmdline(directory, "root=/dev/x\n")
