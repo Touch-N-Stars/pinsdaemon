@@ -6,6 +6,29 @@ from app.job_manager import JobManager, JobStatus
 
 
 class JobManagerStdinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_structured_progress_is_exposed_on_job(self):
+        manager = JobManager()
+        job_id = await manager.start_job(
+            [
+                sys.executable,
+                "-c",
+                "print('PINS_PROGRESS phase=downloading percent=42 bytes=420 total=1000')",
+            ]
+        )
+
+        for _ in range(100):
+            job = manager.get_job(job_id)
+            if job and job.finished_at is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertIsNotNone(job)
+        self.assertEqual(job.progress_phase, "downloading")
+        self.assertEqual(job.progress_percent, 42)
+        self.assertEqual(job.progress_bytes, 420)
+        self.assertEqual(job.progress_total_bytes, 1000)
+        self.assertIsNotNone(job.progress_updated_at)
+
     async def test_sensitive_stdin_is_not_exposed_and_wifi_result_is_structured(self):
         manager = JobManager()
         job_id = await manager.start_job(

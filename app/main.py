@@ -1260,6 +1260,11 @@ class JobResponse(BaseModel):
     command: str
     errorCode: Optional[str] = None
     errorMessage: Optional[str] = None
+    progressPhase: Optional[str] = None
+    progressPercent: Optional[int] = None
+    progressBytes: Optional[int] = None
+    progressTotalBytes: Optional[int] = None
+    progressUpdatedAt: Optional[float] = None
 
 
 class WifiModeOperationResponse(BaseModel):
@@ -1823,6 +1828,11 @@ def _job_response_from_runtime_job(job) -> JobResponse:
         command=job.command,
         errorCode=getattr(job, "error_code", None),
         errorMessage=getattr(job, "error_message", None),
+        progressPhase=getattr(job, "progress_phase", None),
+        progressPercent=getattr(job, "progress_percent", None),
+        progressBytes=getattr(job, "progress_bytes", None),
+        progressTotalBytes=getattr(job, "progress_total_bytes", None),
+        progressUpdatedAt=getattr(job, "progress_updated_at", None),
     )
 
 
@@ -2120,20 +2130,25 @@ async def install_astap_star_database(request: AstapStarDatabaseInstallRequest):
     if selected and selected.installed:
         raise HTTPException(status_code=409, detail=f"ASTAP star database {database_id} is already installed")
 
+    active_astap_job = next(
+        (
+            job
+            for job in job_manager.jobs.values()
+            if job.status in {JobStatus.STARTED, JobStatus.RUNNING}
+            and ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH in job.command
+        ),
+        None,
+    )
+    if active_astap_job:
+        return _job_response_from_runtime_job(active_astap_job)
+
     cmd = ["sudo", "-n", ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH, database_id]
     job_id = await job_manager.start_job(cmd)
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=500, detail="Failed to create ASTAP install job")
 
-    return JobResponse(
-        jobId=job.id,
-        status=job.status,
-        exitCode=job.exit_code,
-        startedAt=job.created_at,
-        finishedAt=job.finished_at,
-        command=job.command,
-    )
+    return _job_response_from_runtime_job(job)
 
 
 @app.get("/plugins", response_model=PluginsResponse, dependencies=[Depends(verify_token)])

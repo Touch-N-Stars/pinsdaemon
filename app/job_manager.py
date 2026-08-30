@@ -24,6 +24,11 @@ class Job:
     exit_code: Optional[int] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    progress_phase: Optional[str] = None
+    progress_percent: Optional[int] = None
+    progress_bytes: Optional[int] = None
+    progress_total_bytes: Optional[int] = None
+    progress_updated_at: Optional[float] = None
     logs: List[str] = field(default_factory=list)
     # Queues for active websocket listeners
     listeners: List[asyncio.Queue] = field(default_factory=list)
@@ -52,6 +57,40 @@ class JobManager:
     def _sanitize_log_line(line: str) -> str:
         """Redact common credential tokens before storing/streaming logs."""
         return redact_log_line(line)
+
+    @staticmethod
+    def _update_progress(job: Job, line: str) -> None:
+        if not line.startswith("PINS_PROGRESS "):
+            return
+
+        fields = dict(
+            item.split("=", 1)
+            for item in line.removeprefix("PINS_PROGRESS ").split()
+            if "=" in item
+        )
+        phase = fields.get("phase")
+        if phase and re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", phase):
+            job.progress_phase = phase
+
+        for field_name, attribute_name in (
+            ("percent", "progress_percent"),
+            ("bytes", "progress_bytes"),
+            ("total", "progress_total_bytes"),
+        ):
+            raw_value = fields.get(field_name)
+            if raw_value is None:
+                continue
+            try:
+                value = int(raw_value)
+            except ValueError:
+                continue
+            if value < 0:
+                continue
+            if field_name == "percent":
+                value = min(value, 100)
+            setattr(job, attribute_name, value)
+
+        job.progress_updated_at = time.time()
 
     async def start_job(
         self,
@@ -224,6 +263,7 @@ class JobManager:
                 decoded_line = self._sanitize_log_line(line.decode(errors='replace').strip())
                 if decoded_line: 
                     await job.add_log(decoded_line)
+                    self._update_progress(job, decoded_line)
                     if decoded_line.startswith("PINS_WIFI_RESULT "):
                         fields = dict(
                             item.split("=", 1)

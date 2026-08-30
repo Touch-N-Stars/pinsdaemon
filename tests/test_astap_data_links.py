@@ -93,6 +93,13 @@ class AstapDataLinkPackagingTests(unittest.TestCase):
         self.assertIn('LINK_SCRIPT="/usr/local/bin/ensure-astap-data-links.sh"', installer)
         self.assertIn('"$LINK_SCRIPT"', installer)
 
+    def test_database_installer_reports_progress_and_allows_shared_metadata_file(self):
+        installer = (REPO_ROOT / "scripts" / "install-astap-star-database.sh").read_text(encoding="utf-8")
+
+        self.assertIn("PINS_PROGRESS phase=downloading", installer)
+        self.assertIn("timeout=30", installer)
+        self.assertIn("dpkg --force-overwrite -i", installer)
+
 
 if __name__ == "__main__":
     unittest.main()

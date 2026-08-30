@@ -45,20 +45,55 @@ TARGET_PATH="$WORK_DIR/$FILE_NAME"
 STATE_FILE="${ASTAP_STAR_DATABASE_STATE_FILE:-/opt/pinsdaemon/astap-star-databases.json}"
 
 echo "Downloading ASTAP star database ${DATABASE_ID}..."
+echo "PINS_PROGRESS phase=downloading percent=0 bytes=0 total=0"
 python3 - "$DOWNLOAD_URL" "$TARGET_PATH" <<'PY'
+import socket
 import sys
+import time
+import urllib.error
 import urllib.request
 
 url = sys.argv[1]
 out = sys.argv[2]
 
-req = urllib.request.Request(url, headers={"User-Agent": "pinsdaemon-astap-db-installer/1.0"})
-with urllib.request.urlopen(req, timeout=60) as resp, open(out, "wb") as f:
-    while True:
-        chunk = resp.read(1024 * 1024)
-        if not chunk:
-            break
-        f.write(chunk)
+chunk_size = 1024 * 1024
+last_report_at = 0.0
+
+for attempt in range(1, 4):
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "pinsdaemon-astap-db-installer/1.1"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp, open(out, "wb") as f:
+            total_header = resp.headers.get("Content-Length", "")
+            total = int(total_header) if total_header.isdigit() else 0
+            downloaded = 0
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                now = time.monotonic()
+                if now - last_report_at >= 1 or (total and downloaded >= total):
+                    percent = min(100, downloaded * 100 // total) if total else 0
+                    print(
+                        f"PINS_PROGRESS phase=downloading percent={percent} "
+                        f"bytes={downloaded} total={total}",
+                        flush=True,
+                    )
+                    last_report_at = now
+        if downloaded <= 0:
+            raise OSError("download produced no data")
+        break
+    except (OSError, TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        if attempt == 3:
+            raise SystemExit(f"ASTAP database download failed after 3 attempts: {exc}")
+        print(f"Download attempt {attempt} failed: {exc}. Retrying...", flush=True)
+        time.sleep(attempt * 2)
+else:
+    raise SystemExit("ASTAP database download failed")
 PY
 
 if [[ ! -s "$TARGET_PATH" ]]; then
@@ -76,15 +111,19 @@ if dpkg-query -W -f='${Status}' "$PACKAGE_NAME" 2>/dev/null | grep -q "install o
     echo "Package already installed: $PACKAGE_NAME"
 else
     echo "Installing package $PACKAGE_NAME..."
-    if ! dpkg -i "$TARGET_PATH"; then
+    echo "PINS_PROGRESS phase=installing percent=0 bytes=0 total=0"
+    # ASTAP database packages share a small acknowledgement text file. Debian
+    # treats that intentional overlap as a conflict unless overwrite is enabled.
+    if ! dpkg --force-overwrite -i "$TARGET_PATH"; then
         echo "Resolving dependencies..."
         export DEBIAN_FRONTEND=noninteractive
         apt-get install -f -y
-        dpkg -i "$TARGET_PATH"
+        dpkg --force-overwrite -i "$TARGET_PATH"
     fi
 fi
 
 echo "Updating ASTAP install state at $STATE_FILE..."
+echo "PINS_PROGRESS phase=finalizing percent=0 bytes=0 total=0"
 python3 - "$STATE_FILE" "$DATABASE_ID" "$PACKAGE_NAME" "$DOWNLOAD_URL" <<'PY'
 import json
 import os
@@ -142,3 +181,4 @@ else
 fi
 
 echo "ASTAP star database ${DATABASE_ID} is ready."
+echo "PINS_PROGRESS phase=complete percent=100 bytes=0 total=0"

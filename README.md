@@ -811,6 +811,10 @@ Install one ASTAP star database.
   ```
 - **Response**: `JobResponse` object.
 
+If an ASTAP database install is already active, this endpoint returns that
+active job instead of starting a second large download. Poll the job response
+for `progressPhase`, byte counts, percentage, and the last progress timestamp.
+
 - **Environment variables**:
   - `ASTAP_STAR_DATABASE_INSTALL_SCRIPT_PATH` (default: `/usr/local/bin/install-astap-star-database.sh`)
   - `ASTAP_STAR_DATABASE_STATE_FILE` (default: `/opt/pinsdaemon/astap-star-databases.json`)
@@ -846,9 +850,17 @@ Stream live logs from a running job.
   "exitCode": null,
   "startedAt": 1678900000.0,
   "finishedAt": null,
-  "command": "sudo ..." 
+  "command": "sudo ...",
+  "progressPhase": "downloading",
+  "progressPercent": 42,
+  "progressBytes": 275251200,
+  "progressTotalBytes": 655360000,
+  "progressUpdatedAt": 1678900012.0
 }
 ```
+
+Progress fields are optional and remain `null` for jobs whose scripts do not
+emit structured progress.
 
 **FirmwareUploadResponse**
 ```json
