@@ -14,6 +14,7 @@ ALLOWED_PLUGINS=(
     "pins-plugin-ninaapi"
     "pins-plugin-orbitals"
     "pins-plugin-orbuculum"
+    "pins-plugin-perihelion"
     "pins-plugin-phd2tools"
     "pins-plugin-pins"
     "pins-plugin-polaralignment"
