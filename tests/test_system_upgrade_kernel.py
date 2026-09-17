@@ -10,9 +10,9 @@ class SystemUpgradeKernelTests(unittest.TestCase):
     def test_kernel_6_18_39_family_is_the_pinned_target(self):
         source = SYSTEM_UPGRADE.read_text(encoding="utf-8")
 
-        self.assertIn('PINS_TARGET_KERNEL_VERSION:-6.18.39', source)
+        self.assertIn('PINS_TARGET_KERNEL_VERSION:-6.18.50', source)
         self.assertIn(
-            'PINS_TARGET_RPI_UPDATE_HASH:-9393d5a5ba364c10219a17c07bdc63c8a6887878',
+            'PINS_TARGET_RPI_UPDATE_HASH:-e3f5c8e74ebef74ebd8c094576d50c3e55abedce',
             source,
         )
         self.assertIn(
