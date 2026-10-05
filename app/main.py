@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from typing import Optional, List, Dict, Any
 
 from .auth import verify_token
@@ -60,6 +60,7 @@ app.add_middleware(
 # SCRIPT_PATH = os.getenv("UPDATE_SCRIPT_PATH", "/usr/local/bin/system-upgrade.sh")
 SCRIPT_PATH = os.getenv("UPDATE_SCRIPT_PATH", "/usr/local/bin/system-upgrade.sh")
 SAMBA_SCRIPT_PATH = os.getenv("SAMBA_SCRIPT_PATH", "/usr/local/bin/manage-samba.sh")
+SWAP_SCRIPT_PATH = os.getenv("SWAP_SCRIPT_PATH", "/usr/local/bin/manage-swap.py")
 
 # Determine default path for wifi-scan.py
 # In production, it's /usr/local/bin/wifi-scan.py
@@ -2897,6 +2898,76 @@ async def get_wifi_status():
             desiredMode=normalize_network_mode(load_wifi_config().get("desired_mode")),
             observedMode="unknown",
         )
+
+
+class SwapUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sizeGb: StrictInt
+
+    @field_validator("sizeGb")
+    @classmethod
+    def allowed_size(cls, value):
+        if value not in (2, 4, 8):
+            raise ValueError("Swap size must be 2, 4, or 8 GB")
+        return value
+
+
+class SwapStatusResponse(BaseModel):
+    supported: bool
+    backend: Optional[str] = None
+    mechanism: Optional[str] = None
+    configuredSizeMb: int
+    activeFileSizeMb: int
+    availableBytes: int
+    pendingReboot: bool
+    optionsGb: List[int]
+    defaultSizeGb: int
+    unsupportedReason: Optional[str] = None
+
+
+async def _read_swap_status() -> SwapStatusResponse:
+    if not os.path.isfile(SWAP_SCRIPT_PATH):
+        raise HTTPException(status_code=503, detail="Swap helper unavailable; update pinsdaemon")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "sudo", "-n", SWAP_SCRIPT_PATH, "status",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError:
+        raise HTTPException(status_code=503, detail="Unable to start swap helper")
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise HTTPException(status_code=503, detail="Swap status timed out")
+    if process.returncode != 0:
+        raise HTTPException(status_code=503, detail=stderr.decode(errors="replace").strip()[:500])
+    try:
+        return SwapStatusResponse.model_validate_json(stdout)
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Invalid swap helper response")
+
+
+@app.get("/system/swap", response_model=SwapStatusResponse, dependencies=[Depends(verify_token)])
+async def get_system_swap():
+    return await _read_swap_status()
+
+
+@app.put("/system/swap", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def update_system_swap(request: SwapUpdateRequest):
+    status = await _read_swap_status()
+    if not status.supported:
+        raise HTTPException(status_code=409, detail=status.unsupportedReason)
+    growth = max(0, request.sizeGb * 1024 - status.activeFileSizeMb) * 1024 * 1024
+    if growth and status.availableBytes < growth + 256 * 1024 * 1024:
+        raise HTTPException(status_code=409, detail="Not enough free storage to grow swap")
+    # The root-owned helper repeats validation and disk checks under a file lock.
+    job_id = await job_manager.start_job(["sudo", "-n", SWAP_SCRIPT_PATH, "set", str(request.sizeGb)])
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Swap job was not created")
+    return _job_response_from_runtime_job(job)
 
 
 class SystemTimeResponse(BaseModel):

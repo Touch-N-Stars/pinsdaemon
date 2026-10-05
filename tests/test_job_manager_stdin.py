@@ -6,6 +6,22 @@ from app.job_manager import JobManager, JobStatus
 
 
 class JobManagerStdinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_swap_failure_is_exposed_to_client(self):
+        manager = JobManager()
+        job_id = await manager.start_job([
+            sys.executable, "-c",
+            "import sys; print('PINS_SWAP_RESULT code=SWAP_CONFIGURATION_FAILED "
+            "message=Not_enough_free_storage'); sys.exit(1)",
+        ])
+        for _ in range(100):
+            job = manager.get_job(job_id)
+            if job and job.finished_at is not None:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(job.status, JobStatus.FAILED)
+        self.assertEqual(job.error_code, "SWAP_CONFIGURATION_FAILED")
+        self.assertEqual(job.error_message, "Not enough free storage")
+
     async def test_structured_progress_is_exposed_on_job(self):
         manager = JobManager()
         job_id = await manager.start_job(

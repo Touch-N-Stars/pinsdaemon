@@ -70,6 +70,11 @@ if [ -f "/usr/local/bin/manage-localization.sh" ]; then
     chmod 755 /usr/local/bin/manage-localization.sh
 fi
 
+if [ -f "/usr/local/bin/manage-swap.py" ]; then
+    chown root:root /usr/local/bin/manage-swap.py
+    chmod 755 /usr/local/bin/manage-swap.py
+fi
+
 if [ -f "/usr/local/bin/wifi-connect.sh" ]; then
     chown root:root /usr/local/bin/wifi-connect.sh
     chmod 755 /usr/local/bin/wifi-connect.sh

@@ -264,10 +264,10 @@ class JobManager:
                 if decoded_line: 
                     await job.add_log(decoded_line)
                     self._update_progress(job, decoded_line)
-                    if decoded_line.startswith("PINS_WIFI_RESULT "):
+                    if decoded_line.startswith(("PINS_WIFI_RESULT ", "PINS_SWAP_RESULT ")):
                         fields = dict(
                             item.split("=", 1)
-                            for item in decoded_line.removeprefix("PINS_WIFI_RESULT ").split()
+                            for item in decoded_line.partition(" ")[2].split()
                             if "=" in item
                         )
                         code = fields.get("code")
