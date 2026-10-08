@@ -65,6 +65,10 @@ done
 
 export DEBIAN_FRONTEND=noninteractive
 
+# Serialize source changes and package operations.
+exec 9>/run/lock/pins-repository.lock
+flock -n 9 || { echo "Another PINS package operation is running" >&2; exit 1; }
+
 restart_pins_service() {
     local service_list
     local service_name
@@ -94,7 +98,7 @@ restart_pins_service() {
 if [[ "$ACTION" == "install" ]]; then
     echo "Installing plugin package: $PACKAGE_NAME"
     apt-get update
-    apt-get install -y "$PACKAGE_NAME"
+    apt-get install -y --allow-downgrades "$PACKAGE_NAME"
     echo "Plugin installed successfully: $PACKAGE_NAME"
     exit 0
 fi

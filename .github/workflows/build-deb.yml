@@ -62,6 +62,7 @@ jobs:
         cp scripts/manage-samba.sh build/usr/local/bin/
         cp scripts/manage-localization.sh build/usr/local/bin/
         cp scripts/manage-swap.py build/usr/local/bin/
+        cp scripts/manage-repository.py build/usr/local/bin/
         cp scripts/pins-rig-name build/usr/local/bin/
         cp scripts/wifi-connect.sh build/usr/local/bin/
         cp scripts/pins-wifi-profile.py build/usr/local/bin/
@@ -117,6 +118,7 @@ jobs:
         dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './usr/local/bin/pins-wifi-viability.py'
         dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './opt/pinsdaemon/app/wifi_regulatory.py'
         dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './usr/local/bin/manage-swap.py'
+        dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './usr/local/bin/manage-repository.py'
         
     - name: Upload Artifact
       uses: actions/upload-artifact@v4

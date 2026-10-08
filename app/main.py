@@ -19,7 +19,7 @@ from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPExcept
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 
 from .auth import verify_token
 from .job_manager import job_manager, JobStatus
@@ -120,6 +120,7 @@ UPDATES_PACKAGES_URL = os.getenv(
 UPDATES_PACKAGE_PATTERNS = [
     p.strip() for p in os.getenv("UPDATES_PACKAGE_PATTERNS", "pins,pinsdaemon,pins-plugin-*").split(",") if p.strip()
 ]
+REPOSITORY_SCRIPT_PATH = os.getenv("REPOSITORY_SCRIPT_PATH", "/usr/local/bin/manage-repository.py")
 AVAILABLE_PLUGIN_PACKAGES = [
     "pins-plugin-alpaca",
     "pins-plugin-groundstation",
@@ -1945,6 +1946,80 @@ async def health():
     )
 
 
+class RepositoryChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    channel: Literal["trixie", "unstable"]
+
+
+class RepositoryStatusResponse(BaseModel):
+    channel: Optional[Literal["trixie", "unstable"]] = None
+    configured: bool
+    suites: List[str]
+    repositoryUrl: str
+    options: List[str]
+    packagesUrl: Optional[str] = None
+
+
+async def _read_repository_status() -> RepositoryStatusResponse:
+    if not os.path.isfile(REPOSITORY_SCRIPT_PATH):
+        raise HTTPException(status_code=503, detail="Repository helper unavailable; update pinsdaemon")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "sudo", "-n", REPOSITORY_SCRIPT_PATH, "status",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.communicate()
+            raise HTTPException(status_code=503, detail="Repository status timed out")
+    except OSError:
+        raise HTTPException(status_code=503, detail="Unable to start repository helper")
+    if process.returncode:
+        raise HTTPException(status_code=503, detail=stderr.decode(errors="replace").strip()[:500])
+    try:
+        return RepositoryStatusResponse.model_validate_json(stdout)
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Invalid repository helper response")
+
+
+async def _fetch_active_repository_packages() -> str:
+    # Compatibility for installations upgrading from a package without the helper.
+    if not os.path.isfile(REPOSITORY_SCRIPT_PATH):
+        return await asyncio.to_thread(_fetch_packages_index, UPDATES_PACKAGES_URL)
+    status = await _read_repository_status()
+    if not status.configured:
+        raise HTTPException(status_code=409, detail="No PINS repository configured")
+    # Unstable is an overlay: absent packages continue to come from trixie.
+    # Later entries replace stable versions, even when their version is lower.
+    indexes = []
+    for channel in ("trixie", "unstable"):
+        if channel in status.suites:
+            indexes.append(await asyncio.to_thread(
+                _fetch_packages_index,
+                f"{status.repositoryUrl}/dists/{channel}/main/binary-arm64/Packages",
+            ))
+    return "\n\n".join(indexes)
+
+
+@app.get("/repository", response_model=RepositoryStatusResponse, dependencies=[Depends(verify_token)])
+async def get_repository():
+    return await _read_repository_status()
+
+
+@app.post("/repository", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def change_repository(request: RepositoryChangeRequest):
+    status = await _read_repository_status()
+    if not status.configured:
+        raise HTTPException(status_code=409, detail="Configure the signed trixie repository first")
+    job_id = await job_manager.start_job(["sudo", "-n", REPOSITORY_SCRIPT_PATH, "set", request.channel])
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=500, detail="Repository job was not created")
+    return _job_response_from_runtime_job(job)
+
+
 @app.post("/upgrade", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def trigger_upgrade(request: UpgradeRequest):
     """
@@ -1976,7 +2051,7 @@ async def trigger_upgrade(request: UpgradeRequest):
 @app.get("/updates/check", response_model=UpdatesCheckResponse, dependencies=[Depends(verify_token)])
 async def check_updates():
     try:
-        packages_text = await asyncio.to_thread(_fetch_packages_index, UPDATES_PACKAGES_URL)
+        packages_text = await _fetch_active_repository_packages()
     except urllib.error.URLError as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch repo metadata: {e}")
     except Exception as e:
@@ -2004,7 +2079,8 @@ async def check_updates():
         latest_version = repo_versions.get(name)
         update_available = False
         if installed_version and latest_version:
-            update_available = await _debian_version_gt(latest_version, installed_version)
+            # Switching channels can intentionally select an older build.
+            update_available = latest_version != installed_version
 
         if update_available:
             has_updates = True
@@ -2156,7 +2232,7 @@ async def install_astap_star_database(request: AstapStarDatabaseInstallRequest):
 @app.get("/plugins", response_model=PluginsResponse, dependencies=[Depends(verify_token)])
 async def list_plugins():
     try:
-        packages_text = await asyncio.to_thread(_fetch_packages_index, UPDATES_PACKAGES_URL)
+        packages_text = await _fetch_active_repository_packages()
     except urllib.error.URLError as e:
         raise HTTPException(status_code=502, detail=f"Failed to fetch repo metadata: {e}")
     except Exception as e:

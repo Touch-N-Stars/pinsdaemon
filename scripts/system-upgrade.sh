@@ -230,6 +230,8 @@ if [[ "${PINS_UPDATE_DETACHED}" != "true" ]]; then
 fi
 
 # Update package lists
+exec 9>/run/lock/pins-repository.lock
+flock -n 9 || { echo "Another PINS package operation is running" >&2; exit 1; }
 echo "Running apt update..."
 export DEBIAN_FRONTEND=noninteractive
 
@@ -241,7 +243,7 @@ stdbuf -oL -eL apt-get update
 
 # Upgrade packages
 echo "Running apt upgrade..."
-UPGRADE_OUTPUT=$(stdbuf -oL -eL apt-get upgrade -y 2>&1)
+UPGRADE_OUTPUT=$(stdbuf -oL -eL apt-get upgrade -y --allow-downgrades 2>&1)
 echo "$UPGRADE_OUTPUT"
 
 HAS_PACKAGE_UPDATES=true
