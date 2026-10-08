@@ -1991,16 +1991,12 @@ async def _fetch_active_repository_packages() -> str:
     status = await _read_repository_status()
     if not status.configured:
         raise HTTPException(status_code=409, detail="No PINS repository configured")
-    # Unstable is an overlay: absent packages continue to come from trixie.
-    # Later entries replace stable versions, even when their version is lower.
-    indexes = []
-    for channel in ("trixie", "unstable"):
-        if channel in status.suites:
-            indexes.append(await asyncio.to_thread(
-                _fetch_packages_index,
-                f"{status.repositoryUrl}/dists/{channel}/main/binary-arm64/Packages",
-            ))
-    return "\n\n".join(indexes)
+    # Only show packages from the selected channel, including on legacy images
+    # that still have both suites configured until their next repository switch.
+    return await asyncio.to_thread(
+        _fetch_packages_index,
+        f"{status.repositoryUrl}/dists/{status.channel}/main/binary-arm64/Packages",
+    )
 
 
 @app.get("/repository", response_model=RepositoryStatusResponse, dependencies=[Depends(verify_token)])

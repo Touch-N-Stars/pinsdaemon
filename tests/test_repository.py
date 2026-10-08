@@ -38,10 +38,10 @@ class RepositoryHelperTests(unittest.TestCase):
         other = self.other.read_bytes()
         status = self.switch("unstable")
         self.assertEqual(status["channel"], "unstable")
-        self.assertEqual(status["suites"], ["trixie", "unstable"])
-        self.assertEqual(self.source.read_text(), self.stable)
+        self.assertEqual(status["suites"], ["unstable"])
+        self.assertEqual(self.source.read_text(), self.stable.replace("trixie", "unstable"))
         overlay = self.root / "etc/apt/sources.list.d/pins-channel.list"
-        self.assertEqual(overlay.read_text(), self.stable.replace("trixie", "unstable"))
+        self.assertFalse(overlay.exists())
         status = self.switch("trixie")
         self.assertEqual(status["suites"], ["trixie"])
         self.assertFalse(overlay.exists())
@@ -49,12 +49,12 @@ class RepositoryHelperTests(unittest.TestCase):
         pin = (self.root / "etc/apt/preferences.d/pins-channel.pref").read_text()
         self.assertIn("Package: pins pinsdaemon pins-plugin-*", pin)
         self.assertIn("o=Touch-N-Stars,n=trixie", pin)
-        self.assertIn("Pin-Priority: 1001", pin)
+        self.assertIn("Pin-Priority: -1", pin)
 
     def test_repeated_switch_does_not_duplicate_sources(self):
         self.switch("unstable")
         self.switch("unstable")
-        self.assertEqual(len(repository.inspect_sources(self.root)), 2)
+        self.assertEqual(len(repository.inspect_sources(self.root)), 1)
 
     def test_migrates_existing_unstable_list_and_keeps_disabled_comments(self):
         unstable = self.stable.replace("trixie", "unstable")
@@ -67,12 +67,26 @@ class RepositoryHelperTests(unittest.TestCase):
         text = "Types: deb\nURIs: https://repo.touch-n-stars.eu/reprepro/\nSuites: trixie\n unstable\nComponents: main\nSigned-By: /usr/share/keyrings/pins.gpg\n"
         path = self.write("etc/apt/sources.list.d/pins.sources", text)
         self.switch("unstable")
-        self.assertIn("Suites: trixie\nComponents", path.read_text())
+        self.assertIn("Suites: unstable\nComponents", path.read_text())
         overlay = self.root / "etc/apt/sources.list.d/pins-channel.sources"
-        self.assertIn("Suites: unstable\nComponents", overlay.read_text())
-        self.assertIn("Signed-By: /usr/share/keyrings/pins.gpg", overlay.read_text())
+        self.assertFalse(overlay.exists())
+        self.assertIn("Signed-By: /usr/share/keyrings/pins.gpg", path.read_text())
         self.switch("trixie")
         self.assertFalse(overlay.exists())
+
+    def test_removes_legacy_overlay_in_either_channel(self):
+        for channel in ("unstable", "trixie"):
+            overlay = self.write("etc/apt/sources.list.d/pins-channel.list", self.stable.replace("trixie", "unstable"))
+            self.source.write_text(self.stable)
+            self.assertEqual(self.switch(channel)["suites"], [channel])
+            self.assertFalse(overlay.exists())
+            self.assertEqual(self.source.read_text(), self.stable.replace("trixie", channel))
+
+    def test_managed_only_source_can_switch_back(self):
+        self.source.unlink()
+        overlay = self.write("etc/apt/sources.list.d/pins-channel.list", self.stable.replace("trixie", "unstable"))
+        self.assertEqual(self.switch("trixie")["suites"], ["trixie"])
+        self.assertEqual(overlay.read_text(), self.stable)
 
     def test_missing_source_and_invalid_channel_cannot_write(self):
         self.source.unlink()
@@ -105,6 +119,15 @@ class RepositoryHelperTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertIn("APT::Update::Error-Mode=any", run.call_args_list[0].args[0])
 
+    def test_failed_refresh_restores_legacy_overlay(self):
+        overlay = self.write("etc/apt/sources.list.d/pins-channel.list", self.stable.replace("trixie", "unstable"))
+        before = {path: path.read_bytes() for path in repository.source_paths(self.root)}
+        with patch.object(repository.subprocess, "run", side_effect=[subprocess.CalledProcessError(100, "apt-get"), None]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                repository.configure_repository("unstable", self.root)
+        self.assertEqual({path: path.read_bytes() for path in repository.source_paths(self.root)}, before)
+        self.assertTrue(overlay.exists())
+
     def test_successful_refresh_runs_apt_and_reports_channel(self):
         with patch.object(repository.subprocess, "run") as run:
             result = repository.configure_repository("unstable", self.root)
@@ -135,15 +158,14 @@ class RepositoryApiTests(unittest.IsolatedAsyncioTestCase):
         start.assert_awaited_once_with(["sudo", "-n", main.REPOSITORY_SCRIPT_PATH, "set", "trixie"])
         self.assertEqual(response.jobId, "repo-1")
 
-    async def test_unstable_metadata_overlays_stable_and_retains_missing_plugins(self):
-        stable = "Package: pins\nVersion: 5\n\nPackage: pins-plugin-perihelion\nVersion: 2\n"
+    async def test_unstable_metadata_excludes_stable_only_plugins(self):
         unstable = "Package: pins\nVersion: 4~unstable\n"
         with patch.object(main.os.path, "isfile", return_value=True):
             with patch.object(main, "_read_repository_status", AsyncMock(return_value=self.status())):
-                with patch.object(main, "_fetch_packages_index", side_effect=[stable, unstable]) as fetch:
+                with patch.object(main, "_fetch_packages_index", return_value=unstable) as fetch:
                     versions = main._parse_packages_versions(await main._fetch_active_repository_packages())
-        self.assertEqual(versions, {"pins": "4~unstable", "pins-plugin-perihelion": "2"})
-        self.assertIn("/unstable/", fetch.call_args_list[1].args[0])
+        self.assertEqual(versions, {"pins": "4~unstable"})
+        fetch.assert_called_once_with(f"{repository.REPOSITORY_URL}/dists/unstable/main/binary-arm64/Packages")
 
     async def test_return_to_stable_is_reported_as_available_update(self):
         with patch.object(main, "_fetch_active_repository_packages", AsyncMock(return_value="Package: pins\nVersion: 2\n")):

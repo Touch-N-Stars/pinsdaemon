@@ -117,9 +117,9 @@ APT suites, and repository URL. `POST /repository` with
 Poll `/jobs/{jobId}` until it succeeds before installing or updating packages.
 
 The root-owned `manage-repository.py` helper preserves the existing signed PINS
-source and all Debian/Raspberry Pi sources. Unstable adds an experimental source
-alongside trixie, which supplies packages absent from unstable. Selecting trixie
-removes the experimental source. APT pins prefer the selected channel for
+source settings and all Debian/Raspberry Pi sources. Switching replaces the PINS
+suite so only the selected channel is active, and removes any legacy experimental
+overlay. APT pins prefer the selected channel and reject the other PINS channel for
 `pins`, `pinsdaemon`, and `pins-plugin-*`, including lower versions when returning
 to stable. Switching refreshes APT and rolls back its source and preference
 changes if downloading or verifying an index fails; it does not install packages.
@@ -128,7 +128,7 @@ Plugin installation and system upgrades permit the channel's selected downgrades
 Repository switches, plugin actions, and upgrades share a lock so their APT
 operations cannot overlap. The existing system upgrade endpoint installs updates
 from the configured sources. Update checks and plugin metadata use the same
-selected channel and stable fallback. Existing installations need an updated
+selected channel exclusively. Existing installations need an updated
 pinsdaemon package to expose the repository endpoints.
 
 ### 1. System Upgrade

@@ -98,30 +98,20 @@ def configure_repository(channel, root=Path("/"), refresh=True):
         raise ValueError("Repository channel must be trixie or unstable")
     entries = inspect_sources(root)
     managed = {root / "etc/apt/sources.list.d" / name for name in (MANAGED_LIST, MANAGED_SOURCES)}
-    base = [entry for entry in entries if entry[0] not in managed]
+    base = [entry for entry in entries if entry[0] not in managed] or entries
     if not base:
         raise ValueError("No existing PINS APT source; configure the signed trixie repository first")
-    changes = {}
-    # Preserve all existing trust and architecture settings. Keep trixie as the
-    # dependency fallback, and add the experimental overlay only when selected.
+    # Remove the old overlay and rewrite every active PINS source to one suite.
+    # Preserve architecture, signing keys and all unrelated repository entries.
+    changes = {path: None for path in managed}
     for path, stanza, data, _ in base:
-        old = changes.get(path, path.read_text())
+        old = changes.get(path) or path.read_text()
         if path.suffix == ".sources":
-            stable = re.sub(r"(?im)^Suites:[^\n]*(?:\n[ \t]+[^\n]*)*", "Suites: trixie", stanza)
+            selected = re.sub(r"(?im)^Suites:[^\n]*(?:\n[ \t]+[^\n]*)*", f"Suites: {channel}", stanza)
         else:
-            stable = f"{data[1]}{data[2]}{data[3]}trixie{data[5]}"
-        changes[path] = (old.replace(stanza, stable) if path.suffix == ".sources" else
-                         re.sub("^" + re.escape(stanza) + "$", lambda _: stable, old, flags=re.MULTILINE))
-    for path in managed:
-        changes[path] = None
-    if channel == "unstable":
-        path, stanza, data, _ = base[0]
-        if path.suffix == ".sources":
-            overlay = re.sub(r"(?im)^Suites:[^\n]*(?:\n[ \t]+[^\n]*)*", "Suites: unstable", stanza)
-            changes[root / "etc/apt/sources.list.d" / MANAGED_SOURCES] = overlay + "\n"
-        else:
-            overlay = f"{data[1]}{data[2]}{data[3]}unstable{data[5]}"
-            changes[root / "etc/apt/sources.list.d" / MANAGED_LIST] = overlay + "\n"
+            selected = f"{data[1]}{data[2]}{data[3]}{channel}{data[5]}"
+        changes[path] = (old.replace(stanza, selected) if path.suffix == ".sources" else
+                         re.sub("^" + re.escape(stanza) + "$", lambda _: selected, old, flags=re.MULTILINE))
     changes[root / "etc/apt/preferences.d" / PREFERENCE] = (
         "# Managed by PINS: select this channel even when its version is lower.\n"
         "Package: pins pinsdaemon pins-plugin-*\n"
@@ -129,7 +119,7 @@ def configure_repository(channel, root=Path("/"), refresh=True):
         "Pin-Priority: 1002\n\n"
         "Package: pins pinsdaemon pins-plugin-*\n"
         f"Pin: release o=Touch-N-Stars,n={'trixie' if channel == 'unstable' else 'unstable'}\n"
-        "Pin-Priority: 1001\n"
+        "Pin-Priority: -1\n"
     )
     originals = {}
     for path in changes:
