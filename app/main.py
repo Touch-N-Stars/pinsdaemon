@@ -2918,6 +2918,7 @@ class SwapStatusResponse(BaseModel):
     mechanism: Optional[str] = None
     configuredSizeMb: int
     activeFileSizeMb: int
+    activeSwapSizeMb: Optional[int] = None
     availableBytes: int
     pendingReboot: bool
     optionsGb: List[int]

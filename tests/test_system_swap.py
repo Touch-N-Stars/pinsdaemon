@@ -30,6 +30,7 @@ class SwapHelperTests(unittest.TestCase):
         self.write("usr/lib/systemd/system-generators/rpi-swap-generator", "")
         self.write("etc/rpi/swap.conf", "[Main]\nMechanism=auto\n")
         self.write("var/swap", "")
+        self.write("proc/swaps", "Filename Type Size Used Priority\n/dev/zram0 partition 2048 0 100\n")
         with (self.root / "var/swap").open("r+b") as file:
             file.truncate(2048 * swap.MIB)
 
@@ -42,14 +43,15 @@ class SwapHelperTests(unittest.TestCase):
         with patch.object(swap.shutil, "disk_usage", return_value=SimpleNamespace(free=20 * 1024**3)):
             return swap.configure_swap(size, self.root)
 
-    def test_default_and_pending_changes_preserve_zram_and_live_file(self):
+    def test_selected_sizes_enable_disk_swap_without_changing_live_swap(self):
         self.assertEqual(swap.swap_status(self.root)["configuredSizeMb"], 2048)
         for size in (4, 8, 2):
             result = self.configure(size)
             self.assertEqual(result["configuredSizeMb"], size * 1024)
             self.assertEqual(result["activeFileSizeMb"], 2048)
-            self.assertEqual(result["pendingReboot"], size != 2)
-            self.assertEqual(result["mechanism"], "zram+file")
+            self.assertTrue(result["pendingReboot"])
+            self.assertEqual(result["mechanism"], "swapfile")
+            self.assertEqual(result["activeSwapSizeMb"], 2048)
             self.assertEqual((self.root / "etc/rpi/swap.conf").read_text(), "[Main]\nMechanism=auto\n")
 
     def test_low_space_rejects_growth_without_writing(self):
@@ -62,7 +64,29 @@ class SwapHelperTests(unittest.TestCase):
         self.configure(4)
         with (self.root / "var/swap").open("r+b") as file:
             file.truncate(4096 * swap.MIB)
+        self.write("proc/swaps", "Filename Type Size Used Priority\n/var/swap file 4096 0 -2\n")
         self.assertFalse(swap.swap_status(self.root)["pendingReboot"])
+
+    def test_existing_eight_gb_backing_file_still_needs_mechanism_change(self):
+        with (self.root / "var/swap").open("r+b") as file:
+            file.truncate(8192 * swap.MIB)
+        result = self.configure(8)
+        self.assertEqual(result["activeFileSizeMb"], 8192)
+        self.assertEqual(result["activeSwapSizeMb"], 2048)
+        self.assertTrue(result["pendingReboot"])
+
+    def test_real_swap_header_is_rounded_up_and_other_swap_is_reported(self):
+        with patch.object(swap, "MIB", 1024 * 1024):
+            self.write("proc/swaps", "Filename Type Size Used Priority\n/var/swap file 8388604 0 -2\n")
+            self.assertEqual(swap.active_swap(self.root, "/var/swap"), (8192, 8192))
+            self.write("proc/swaps", "Filename Type Size Used Priority\n/var/swap file 8388604 0 -2\n/dev/zram0 partition 2097148 0 100\n")
+            self.assertEqual(swap.active_swap(self.root, "/var/swap"), (10240, 8192))
+
+    def test_later_mechanism_override_rolls_back(self):
+        self.write("etc/rpi/swap.conf.d/zz-custom.conf", "[Main]\nMechanism=zram+file\n")
+        with self.assertRaisesRegex(ValueError, "mechanism"):
+            self.configure(8)
+        self.assertFalse((self.root / ("etc/rpi/swap.conf.d/" + swap.DROPIN)).exists())
 
     def test_refuses_device_or_directory_as_swap_file(self):
         self.write("etc/rpi/swap.conf", "[File]\nPath=/var\n")

@@ -506,32 +506,37 @@ Alias endpoint for the same update behavior:
 - **URL**: `GET /system/swap`
 - **Auth**: Bearer token required.
 - Returns `supported`, `backend`, `mechanism`, `configuredSizeMb`,
-  `activeFileSizeMb`, `availableBytes`, `pendingReboot`, `optionsGb: [2, 4, 8]`,
+  `activeFileSizeMb`, `activeSwapSizeMb`, `availableBytes`, `pendingReboot`, `optionsGb: [2, 4, 8]`,
   `defaultSizeGb: 2`, and `unsupportedReason`.
 - **URL**: `PUT /system/swap`
 - **Body**: `{ "sizeGb": 4 }`; only integer values `2`, `4`, and `8` are accepted.
 - Returns the standard job response. Follow `/jobs/{jobId}` for completion.
 
-The default image uses a 2 GiB disk-backed file. The UI calls these sizes GB;
-2/4/8 GB correspond to 2048/4096/8192 MiB. On Raspberry Pi OS Trixie,
-`rpi-swap` can use `/var/swap` as **zram writeback storage**, so its file size is
-not the same as the swap capacity shown by `free` or `/proc/swaps`.
+The image defaults to 2 GiB compressed zram with a disk-backed writeback file.
+Saving a size through this endpoint selects **traditional disk swap**, replacing
+zram after the next reboot. The UI calls these sizes GB; 2/4/8 GB correspond to
+2048/4096/8192 MiB. `activeSwapSizeMb` reports Linux's active total swap capacity
+from `/proc/swaps` (rounded up to MiB to account for the swap header), matching
+`free` and htop. `activeFileSizeMb` remains the on-disk file size for compatibility;
+a zram writeback file alone does not increase active swap capacity.
 
 The root-owned `manage-swap.py` helper writes an atomic
-`/etc/rpi/swap.conf.d/99-pinsdaemon-swap.conf` override for `[File] FixedSizeMiB`
-and `MaxSizeMiB`, preserving the mechanism, file path and zram settings.
+`/etc/rpi/swap.conf.d/99-pinsdaemon-swap.conf` override for `[Main] Mechanism=swapfile`
+and `[File] FixedSizeMiB` and `MaxSizeMiB`, preserving the file path.
 For older `dphys-swapfile` images it updates both `CONF_SWAPSIZE` and
 `CONF_MAXSWAP` in `/etc/dphys-swapfile`. It checks storage for growth plus
 256 MiB headroom, serializes operations, and rolls back if another drop-in
-overrides the selected size. Systems with no supported manager, zram-only
-swap or disabled `rpi-swap` are reported as unsupported.
+overrides the selected size or mechanism. Systems with no supported manager,
+zram-only swap or disabled `rpi-swap` are reported as unsupported.
 
-**Reboot is required to apply a changed file size.** The helper never calls
-swapoff, resizes an active file, restarts swap services or reboots automatically.
-Reboot after the observing session, then refresh status to verify the actual
-file size. Returning to 2 GB uses the same endpoint. Changing the daemon package
-alone does not change swap. Older daemons return 404 and the app requests an
-update. No additional package is installed by the swap endpoint.
+**Reboot is required to apply a changed size or mechanism.** The helper never
+calls swapoff, resizes an active file, restarts swap services or reboots automatically.
+Reboot after the observing session, then refresh status to verify active system
+swap. The same size remains pending when an existing file has the requested size
+but is still only backing zram. Returning to 2 GB uses the same endpoint and keeps
+traditional disk swap. Updating the daemon package alone does not change swap.
+Clients require the active-capacity field and request a daemon update if absent.
+No additional package is installed by the swap endpoint.
 
 References: [Raspberry Pi swap configuration](https://github.com/raspberrypi/rpi-swap/blob/main/man/man5/swap.conf.5),
 [reboot requirement](https://github.com/raspberrypi/rpi-swap#making-configuration-changes),

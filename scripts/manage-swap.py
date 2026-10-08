@@ -52,6 +52,24 @@ def dphys_config(root):
     return values
 
 
+def active_swap(root, file_name):
+    path = system_path(root, "/proc/swaps")
+    if not path.exists():
+        return None, None
+    total_kib = file_kib = 0
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) < 5:
+            raise ValueError("Invalid active swap inventory.")
+        size = int(fields[2])
+        total_kib += size
+        if fields[0] == file_name:
+            file_kib += size
+    # mkswap reserves a header page; round up to report the configured MiB.
+    return ((total_kib * 1024 + MIB - 1) // MIB,
+            (file_kib * 1024 + MIB - 1) // MIB)
+
+
 def swap_status(root="/"):
     backend = None
     mechanism = None
@@ -93,10 +111,15 @@ def swap_status(root="/"):
     available = shutil.disk_usage(parent).free if parent.is_dir() else 0
     # Without a fixed override, report the existing file; the image default is 2 GiB.
     configured = configured if configured is not None else (active or 2048)
+    active_capacity, active_file_capacity = active_swap(root, file_name)
+    pending = supported and configured != active
+    if supported and mechanism in {"swapfile", "dphys-swapfile"}:
+        pending = pending or active_file_capacity != configured
     return {
         "supported": supported, "backend": backend, "mechanism": mechanism,
         "configuredSizeMb": configured, "activeFileSizeMb": active,
-        "availableBytes": available, "pendingReboot": supported and configured != active,
+        "activeSwapSizeMb": active_capacity,
+        "availableBytes": available, "pendingReboot": pending,
         "optionsGb": list(SIZES), "defaultSizeGb": 2,
         "unsupportedReason": None if supported else reason,
     }
@@ -137,7 +160,8 @@ def configure_swap(size_gb, root="/"):
         raise ValueError("Not enough free storage; leave at least 256 MiB after growing swap.")
     if status["backend"] == "rpi-swap":
         path = system_path(root, "/etc/rpi/swap.conf.d/" + DROPIN)
-        text = ("# Managed by pinsdaemon; applied on next boot.\n[File]\n"
+        text = ("# Managed by pinsdaemon; applied on next boot.\n"
+                "[Main]\nMechanism=swapfile\n\n[File]\n"
                 f"FixedSizeMiB={size_mb}\nMaxSizeMiB={size_mb}\n")
     else:
         path = system_path(root, "/etc/dphys-swapfile")
@@ -151,6 +175,8 @@ def configure_swap(size_gb, root="/"):
         result = swap_status(root)
         if result["configuredSizeMb"] != size_mb:
             raise ValueError("Another swap configuration overrides this setting.")
+        if result["backend"] == "rpi-swap" and result["mechanism"] != "swapfile":
+            raise ValueError("Another swap configuration overrides the swapfile mechanism.")
         return result
     except Exception:
         if previous is None:
