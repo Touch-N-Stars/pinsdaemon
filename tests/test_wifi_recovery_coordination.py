@@ -177,6 +177,7 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
             control,
             re.compile(r"^Depends:.*\bavahi-daemon\b", re.MULTILINE),
         )
+        self.assertRegex(control, re.compile(r"^Depends:.*\bavahi-utils\b", re.MULTILINE))
         self.assertIn("<type>_pinsdaemon._tcp</type>", avahi_service)
         self.assertIn("<port>8000</port>", avahi_service)
         self.assertIn("<name replace-wildcards=\"yes\">%h</name>", avahi_service)

@@ -1037,3 +1037,12 @@ When installing a newer `pinsdaemon` `.deb`, package hooks perform the following
     ```bash
     sudo /opt/pinsdaemon/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
     ```
+
+### Touch-N-Stars discovery integration
+
+The Linux Touch-N-Stars plugin registers `_touchnstars._tcp` with the system
+Avahi daemon using `avahi-publish-service`. pinsdaemon depends on `avahi-utils`
+to provide this client on PINS images. The existing `_pinsdaemon._tcp` service
+file remains separate. Plugin registration uses its configured port and TXT
+records and requires no new sudoers permissions or root access. Older images
+need `sudo apt install avahi-utils` when upgrading the plugin independently.
