@@ -4,6 +4,8 @@ import subprocess
 import sys
 import os
 import re
+import time
+import argparse
 
 # Configuration paths
 # Assuming this script is in /usr/local/bin or similar in production,
@@ -16,6 +18,10 @@ CONFIG_PATHS = [
 ]
 
 WIFI_CONNECT_SCRIPT = os.path.join(os.path.dirname(__file__), "wifi-connect.sh")
+WIFI_PROFILE_SCRIPT = os.path.join(os.path.dirname(__file__), "pins-wifi-profile.py")
+VIABILITY_SCRIPT = os.path.join(os.path.dirname(__file__), "pins-wifi-viability.py")
+RETRY_STATE_FILE = "/run/pins-wifi-automanage.last-attempt"
+RETRY_SECONDS = 120
 DEFAULT_WIFI_INTERFACE = "wlan0"
 NETWORK_MODE_AUTO = "auto"
 NETWORK_MODE_HOTSPOT = "hotspot"
@@ -84,6 +90,74 @@ def wifi_connect_cmd(*args):
     if os.geteuid() == 0:
         return [WIFI_CONNECT_SCRIPT, *args]
     return ["sudo", "-n", WIFI_CONNECT_SCRIPT, *args]
+
+
+def run_command(command, **kwargs):
+    # wifi-connect.sh validates inherited descriptor 9 against the shared lock.
+    if os.name == "posix" and os.environ.get("PINS_WIFI_COORDINATION_LOCK_HELD") == "1":
+        kwargs["pass_fds"] = (9,)
+    return subprocess.run(command, **kwargs)
+
+
+def client_is_healthy(interface):
+    try:
+        probe = run_command([VIABILITY_SCRIPT, "--interface", interface],
+                            capture_output=True, text=True, timeout=20)
+        return probe.returncode == 0 and "status=healthy" in probe.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        # Keep the same ordinary-router compatibility path as the watchdog.
+        active = run_command(["nmcli", "-t", "-f", "UUID,TYPE,DEVICE", "connection", "show", "--active"],
+                             capture_output=True, text=True, timeout=10)
+        for line in active.stdout.splitlines():
+            fields = line.split(":")
+            if len(fields) != 3 or fields[1:] != ["802-11-wireless", interface]:
+                continue
+            mode = run_command(["nmcli", "-g", "802-11-wireless.mode", "connection", "show", "uuid", fields[0]],
+                               capture_output=True, text=True, timeout=10)
+            if mode.returncode == 0 and mode.stdout.strip() == "infrastructure":
+                route = run_command(["ip", "-4", "route", "show", "default", "dev", interface],
+                                    capture_output=True, text=True, timeout=10)
+                return route.returncode == 0 and " via " in route.stdout
+        return False
+
+
+def saved_client_networks(interface):
+    result = run_command([WIFI_PROFILE_SCRIPT, "--action", "list", "--client-iface", interface],
+                         capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise RuntimeError("Could not read saved Wi-Fi networks")
+    return [n for n in json.loads(result.stdout)["networks"] if n["compatible"] and n["auto_connect"]]
+
+
+def background_retry_allowed(client, hotspot, now):
+    try:
+        with open(RETRY_STATE_FILE, encoding="utf-8") as handle:
+            previous = float(handle.read())
+    except (OSError, ValueError):
+        previous = 0
+    if 0 <= now - previous < RETRY_SECONDS:
+        return False
+    if client == hotspot and hotspot_is_ready(hotspot):
+        # Single-radio retries interrupt AP access. Fail closed if station
+        # inspection is unavailable; explicit UI retries remain possible.
+        try:
+            stations = run_command(["iw", "dev", hotspot, "station", "dump"],
+                                   capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        if stations.returncode or stations.stdout.strip():
+            return False
+    return True
+
+
+def remember_attempt(now):
+    with open(RETRY_STATE_FILE, "w", encoding="utf-8") as handle:
+        handle.write(str(now))
+
+
+def connect_saved_networks(client, hotspot):
+    return run_command(wifi_connect_cmd("--saved-networks", "--client-iface", client,
+                                       "--hotspot-iface", hotspot)).returncode == 0
 
 def load_config():
     for path in CONFIG_PATHS:
@@ -165,7 +239,7 @@ def start_hotspot(client_interface=DEFAULT_WIFI_INTERFACE, hotspot_interface=DEF
         return
     print(f"Starting hotspot on {hotspot_interface} (client iface: {client_interface})...")
     try:
-        subprocess.run(
+        run_command(
             wifi_connect_cmd(
                 "--hotspot",
                 "--client-iface", client_interface,
@@ -177,40 +251,75 @@ def start_hotspot(client_interface=DEFAULT_WIFI_INTERFACE, hotspot_interface=DEF
         print(f"Failed to start hotspot: {e}")
         sys.exit(1)
 
-def main():
-    config = load_config()
+def main(background=False):
+    config = load_config() or {}
     client_interface, hotspot_interface = resolve_wifi_interfaces(config)
     
-    if not config:
-        print("No wifi configuration found.")
-        start_hotspot(client_interface, hotspot_interface)
-        return
-
     desired_mode = str(config.get("desired_mode", NETWORK_MODE_AUTO)).strip().lower()
     if desired_mode == NETWORK_MODE_HOTSPOT:
         print("Persistent hotspot mode is selected; skipping client Wi-Fi.")
         start_hotspot(client_interface, hotspot_interface)
         return
 
-    ssid = config.get("ssid")
-    auto_connect = config.get("auto_connect", False)
-    band = config.get("band", None) # "bg" or "a"
-
-    if auto_connect and ssid:
-        print(f"Auto-connect enabled for SSID: {ssid}")
-        # wifi-connect.sh owns the complete radio transition. On a single
-        # adapter it must stop the AP before NetworkManager can scan or
-        # activate the saved client profile. A pre-scan here runs while the
-        # radio is still in AP mode and incorrectly reports the WLAN missing.
-        if connect_to_wifi(ssid, band, client_interface, hotspot_interface):
-            sys.exit(0)
-        else:
-            print("Connection failed.")
-    else:
-        print("Auto-connect disabled or SSID not configured.")
+    now = time.monotonic()
+    if background and not background_retry_allowed(client_interface, hotspot_interface, now):
+        return
+    if client_is_healthy(client_interface):
+        print("Keeping the healthy active client Wi-Fi connection.")
+        return
+    try:
+        networks = saved_client_networks(client_interface)
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+        print("Saved Wi-Fi networks are unavailable; keeping hotspot fallback.")
+        if not background:
+            start_hotspot(client_interface, hotspot_interface)
+        return
+    if not networks and background:
+        return
+    remember_attempt(now)
+    if networks:
+        print("Trying saved auto-connect networks in NetworkManager priority order.")
+        # One coordinated transition releases the radio, scans, tries candidates,
+        # and rolls back to the AP only after all eligible networks fail.
+        if connect_saved_networks(client_interface, hotspot_interface):
+            return
+        print("Saved network connection attempts failed.")
 
     # Fallback to hotspot
     start_hotspot(client_interface, hotspot_interface)
 
 if __name__ == "__main__":
-    main()
+    import fcntl
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--background", action="store_true")
+    args = parser.parse_args()
+    lock_path = "/run/pins-wifi-coordination.lock"
+    inherited = False
+    if os.environ.get("PINS_WIFI_COORDINATION_LOCK_HELD") == "1":
+        try:
+            inherited = os.path.samefile("/proc/self/fd/9", lock_path)
+        except OSError:
+            pass
+    try:
+        if inherited:
+            main(args.background)
+        else:
+            with open(lock_path, "a") as lock:
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if args.background:
+                            raise SystemExit(0)
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError("Another Wi-Fi operation is in progress")
+                        time.sleep(0.1)
+                os.dup2(lock.fileno(), 9)
+                os.environ["PINS_WIFI_COORDINATION_LOCK_HELD"] = "1"
+                main(args.background)
+    except Exception as exc:
+        # Avoid subprocess details/credentials in job logs.
+        print(f"Wi-Fi auto-management failed: {type(exc).__name__}")
+        raise SystemExit(1)

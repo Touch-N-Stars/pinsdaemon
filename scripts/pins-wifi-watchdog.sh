@@ -159,6 +159,15 @@ is_wifi_client_active() {
 }
 
 if is_hotspot_active; then
+    # Retry saved networks after a cooldown. The helper keeps healthy clients
+    # and skips single-radio retries while stations are connected to the AP.
+    if [[ "$DESIRED_MODE" == "auto" ]]; then
+        PINS_WIFI_COORDINATION_LOCK_HELD=1 /usr/local/bin/wifi-automanage.py --background || true
+        if ! is_hotspot_active; then
+            set_failures 0
+            exit 0
+        fi
+    fi
     FAILURES="$(get_failures)"
     if [[ "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
         log "Fallback hotspot is active on ${HOTSPOT_IFACE}; recovery confirmed"

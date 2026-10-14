@@ -24,11 +24,26 @@ EXPLICIT_CLIENT_IFACE=false
 EXPLICIT_HOTSPOT_IFACE=false
 PASSWORD_STDIN=false
 AUTO_CONNECT="no"
+SAVED_NETWORKS=false
+PROFILE_UUID=""
+PRIORITY=""
 
 # Parse flags while keeping positional support for backward compatibility.
 POSITIONAL_ARGS=()
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
+        --saved-networks)
+            SAVED_NETWORKS=true
+            shift
+            ;;
+        --profile-uuid)
+            PROFILE_UUID="$2"
+            shift 2
+            ;;
+        --priority)
+            PRIORITY="$2"
+            shift 2
+            ;;
         --hotspot)
             FORCE_HOTSPOT=true
             shift
@@ -518,7 +533,7 @@ if [ "$FORCE_HOTSPOT" = true ]; then
     exit $?
 fi
 
-if [ -z "$SSID" ]; then
+if [ -z "$SSID" ] && [ "$SAVED_NETWORKS" != true ] && [ -z "$PROFILE_UUID" ]; then
     echo "Error: SSID is required."
     exit 1
 fi
@@ -562,13 +577,19 @@ if [ ! -x "$WIFI_PROFILE_COMMAND" ]; then
     exit 1
 fi
 
-if ! printf '%s\n' "$PASSWORD" | "$WIFI_PROFILE_COMMAND" \
-    --client-iface "$CLIENT_IFACE" \
-    --hotspot-iface "$HOTSPOT_IFACE" \
-    --ssid "$SSID" \
-    --band "$BAND" \
-    --auto-connect "$AUTO_CONNECT" \
-    --config-file "$WIFI_CONFIG_FILE"; then
+PROFILE_ARGS=(--client-iface "$CLIENT_IFACE" --hotspot-iface "$HOTSPOT_IFACE"
+    --band "$BAND" --auto-connect "$AUTO_CONNECT" --config-file "$WIFI_CONFIG_FILE")
+if [ "$SAVED_NETWORKS" = true ]; then
+    PROFILE_ARGS+=(--saved-networks)
+elif [ -n "$PROFILE_UUID" ]; then
+    PROFILE_ARGS+=(--profile-uuid "$PROFILE_UUID")
+else
+    PROFILE_ARGS+=(--ssid "$SSID")
+fi
+if [ -n "$PRIORITY" ]; then
+    PROFILE_ARGS+=(--priority "$PRIORITY")
+fi
+if ! printf '%s\n' "$PASSWORD" | "$WIFI_PROFILE_COMMAND" "${PROFILE_ARGS[@]}"; then
     PASSWORD=""
     if [ "$PARALLEL_WIFI_MODE" = true ] && verified_pins_peer_connection; then
         echo "Previous verified PINS peer connection was restored. Keeping the conflicting local hotspot suspended."

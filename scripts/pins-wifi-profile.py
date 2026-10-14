@@ -77,6 +77,7 @@ class Nmcli:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env={**os.environ, "LC_ALL": "C"},
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return CommandResult(124, "", type(exc).__name__)
@@ -129,13 +130,106 @@ def _profile_has_usable_credentials(nm: Nmcli, profile_uuid: str) -> bool:
 def _wifi_profile_uuids(nm: Nmcli) -> list[str]:
     result = nm.run(["-t", "-f", "UUID,TYPE", "connection", "show"])
     if result.returncode != 0:
-        return []
+        raise WifiFailure("UNKNOWN", "Could_not_list_saved_networks")
     uuids = []
     for line in result.stdout.splitlines():
         fields = _split_terse(line)
         if len(fields) >= 2 and fields[1] == "802-11-wireless":
             uuids.append(fields[0])
     return uuids
+
+
+def saved_networks(nm: Nmcli, interface: str) -> list[dict]:
+    """Return only non-secret infrastructure profile metadata, including unmanaged profiles."""
+    active = nm.run(["-t", "-f", "UUID", "connection", "show", "--active"])
+    if active.returncode:
+        raise WifiFailure("UNKNOWN", "Could_not_read_active_networks")
+    active_uuids = set(active.stdout.splitlines())
+    fields = ["connection.id", "connection.interface-name", "connection.autoconnect",
+              "connection.autoconnect-priority", "connection.timestamp",
+              "802-11-wireless.ssid", "802-11-wireless.mode", "802-11-wireless.hidden",
+              "802-11-wireless.band"]
+    networks = []
+    for profile_uuid in _wifi_profile_uuids(nm):
+        result = nm.run(["-t", "-f", ",".join(fields), "connection", "show", "uuid", profile_uuid])
+        if result.returncode:
+            raise WifiFailure("UNKNOWN", "Could_not_read_saved_network")
+        values = {}
+        for line in result.stdout.splitlines():
+            parts = _split_terse(line)
+            if len(parts) >= 2:
+                values[parts[0]] = parts[1]
+        if values.get("802-11-wireless.mode", "") not in {"", "infrastructure"}:
+            continue
+        bound = values.get("connection.interface-name", "")
+        networks.append({
+            "uuid": profile_uuid, "name": values.get("connection.id", ""),
+            "ssid": values.get("802-11-wireless.ssid", ""), "interface": bound or None,
+            "compatible": bound in {"", "--", interface},
+            "auto_connect": values.get("connection.autoconnect") == "yes",
+            "priority": int(values.get("connection.autoconnect-priority", "0")),
+            "last_connected": int(values.get("connection.timestamp", "0")),
+            "hidden": values.get("802-11-wireless.hidden") == "yes",
+            "band": values.get("802-11-wireless.band", ""),
+            "connected": profile_uuid in active_uuids,
+        })
+    return sorted(networks, key=lambda n: (-n["priority"], -n["last_connected"], n["uuid"]))
+
+
+def manage_saved_network(args: argparse.Namespace, nm: Nmcli) -> None:
+    profile_uuid = str(uuid.UUID(args.profile_uuid))
+    network = next((n for n in saved_networks(nm, args.client_iface) if n["uuid"] == profile_uuid), None)
+    if network is None:
+        raise WifiFailure("PROFILE_NOT_FOUND", "Saved_client_profile_not_found")
+    if args.action == "forget":
+        if network["connected"]:
+            raise WifiFailure("ASSOCIATION_FAILED", "Disconnect_before_forgetting_active_network")
+        command = ["connection", "delete", "uuid", profile_uuid]
+    else:
+        command = ["connection", "modify", "uuid", profile_uuid]
+        if args.priority is not None:
+            command.extend(["connection.autoconnect-priority", str(args.priority)])
+        if args.auto_connect is not None:
+            command.extend(["connection.autoconnect", "yes" if args.auto_connect else "no"])
+        if len(command) == 4:
+            raise WifiFailure("UNKNOWN", "No_saved_network_settings_supplied")
+    if nm.run(command).returncode:
+        raise WifiFailure("UNKNOWN", "Saved_network_update_failed")
+
+
+def activate_saved_networks(args: argparse.Namespace, nm: Nmcli) -> str:
+    networks = saved_networks(nm, args.client_iface)
+    if args.profile_uuid:
+        networks = [n for n in networks if n["uuid"] == args.profile_uuid and n["compatible"]]
+    else:
+        networks = [n for n in networks if n["compatible"] and n["auto_connect"]]
+        # The shell has already released the AP radio. A failed scan must not
+        # suppress saved/hidden profiles; NetworkManager can still activate them.
+        scan = nm.run(["--wait", "15", "-t", "-f", "SSID", "device", "wifi", "list",
+                       "ifname", args.client_iface, "--rescan", "yes"], timeout=20)
+        if scan.returncode == 0:
+            visible = {_split_terse(line)[0] for line in scan.stdout.splitlines()}
+            networks = [n for n in networks if n["ssid"] in visible or n["hidden"]]
+    if not networks:
+        raise WifiFailure("NETWORK_NOT_FOUND", "No_eligible_saved_network_available")
+    failure = WifiFailure("ASSOCIATION_FAILED", "Saved_networks_failed")
+    for network in networks:
+        try:
+            if not _profile_has_usable_credentials(nm, network["uuid"]):
+                raise WifiFailure("MISSING_CREDENTIALS", "Saved_profile_has_no_NetworkManager_secret")
+            _activate(nm, network["uuid"], args.client_iface, False)
+            _verify_connection_commit(nm, args.client_iface, args.hotspot_iface)
+            _persist_success(Path(args.config_file), ssid=network["ssid"],
+                             auto_connect=network["auto_connect"], band=network["band"],
+                             client=args.client_iface, hotspot=args.hotspot_iface,
+                             profile_uuid=network["uuid"])
+            return network["uuid"]
+        except WifiFailure as exc:
+            failure = exc
+            nm.run(["connection", "down", "uuid", network["uuid"]], timeout=15)
+            # Never print a final job-result marker for an intermediate failure.
+            print(f"Saved network attempt failed: {exc.code}")
+    raise failure
 
 
 def _find_saved_profile(nm: Nmcli, ssid: str, configured_uuid: str | None) -> str:
@@ -507,8 +601,12 @@ def connect(args: argparse.Namespace, password: str, nm: Nmcli) -> str:
     if nm.run(["device", "show", args.client_iface]).returncode != 0:
         raise WifiFailure("INTERFACE_UNAVAILABLE", "Client_Wi-Fi_interface_is_unavailable")
 
+    _, existing_uuid = profile_identity(args.ssid)
+    existing_priority = _profile_value(nm, existing_uuid, "connection.autoconnect-priority")
+
     if not password:
         profile_uuid = _find_saved_profile(nm, args.ssid, configured_uuid)
+        existing_priority = _profile_value(nm, profile_uuid, "connection.autoconnect-priority")
         _activate(nm, profile_uuid, args.client_iface, False)
         _verify_connection_commit(nm, args.client_iface, args.hotspot_iface)
     else:
@@ -550,7 +648,12 @@ def connect(args: argparse.Namespace, password: str, nm: Nmcli) -> str:
     ])
     if result.returncode != 0:
         raise WifiFailure("UNKNOWN", "Failed_to_apply_autoconnect_policy")
-    nm.run(["connection", "modify", "uuid", profile_uuid, "connection.autoconnect-priority", "100"])
+    priority = getattr(args, "priority", None)
+    if priority is None:
+        priority = int(existing_priority) if existing_priority else CLIENT_AUTOCONNECT_PRIORITY
+    if nm.run(["connection", "modify", "uuid", profile_uuid,
+               "connection.autoconnect-priority", str(priority)]).returncode:
+        raise WifiFailure("UNKNOWN", "Failed_to_apply_autoconnect_priority")
     _persist_success(config_path, ssid=args.ssid, auto_connect=args.auto_connect, band=args.band, client=args.client_iface, hotspot=args.hotspot_iface, profile_uuid=profile_uuid)
     return profile_uuid
 
@@ -558,21 +661,57 @@ def connect(args: argparse.Namespace, password: str, nm: Nmcli) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--client-iface", required=True)
-    parser.add_argument("--hotspot-iface", required=True)
-    parser.add_argument("--ssid", required=True)
+    parser.add_argument("--hotspot-iface", default="wlan0")
+    parser.add_argument("--ssid")
+    parser.add_argument("--action", choices=("connect", "list", "update", "forget"), default="connect")
+    parser.add_argument("--saved-networks", action="store_true")
+    parser.add_argument("--profile-uuid", type=lambda value: str(uuid.UUID(value)))
+    parser.add_argument("--priority", type=int)
     parser.add_argument("--band", default="")
-    parser.add_argument("--auto-connect", choices=("yes", "no"), default="no")
+    parser.add_argument("--auto-connect", choices=("yes", "no"))
     parser.add_argument("--config-file", default=os.environ.get("WIFI_CONFIG_FILE", CONFIG_DEFAULT))
     parsed = parser.parse_args()
-    parsed.auto_connect = parsed.auto_connect == "yes"
+    if not IFACE_RE.fullmatch(parsed.client_iface) or not IFACE_RE.fullmatch(parsed.hotspot_iface):
+        parser.error("Invalid Wi-Fi interface")
+    if parsed.priority is not None and not -999 <= parsed.priority <= 999:
+        parser.error("Priority must be between -999 and 999")
+    if parsed.action in {"update", "forget"} and not parsed.profile_uuid:
+        parser.error("A profile UUID is required")
+    if parsed.action == "connect" and not (parsed.ssid or parsed.saved_networks or parsed.profile_uuid):
+        parser.error("An SSID or saved network is required")
+    parsed.auto_connect = None if parsed.auto_connect is None else parsed.auto_connect == "yes"
     return parsed
 
 
 def main() -> int:
     args = parse_args()
-    password = sys.stdin.readline().rstrip("\r\n")
+    password = ""
     try:
-        connect(args, password, Nmcli())
+        nm = Nmcli()
+        if args.action == "list":
+            print(json.dumps({"networks": saved_networks(nm, args.client_iface)}))
+            return 0
+        if args.action in {"update", "forget"}:
+            import fcntl
+            # Serialize profile edits with all connection/recovery operations.
+            with open("/run/pins-wifi-coordination.lock", "a") as lock:
+                deadline = time.monotonic() + 30
+                while True:
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise WifiFailure("UNKNOWN", "Another_Wi-Fi_operation_is_in_progress")
+                        time.sleep(0.1)
+                manage_saved_network(args, nm)
+            print("PINS_WIFI_RESULT code=SUCCESS message=Saved_network_updated")
+            return 0
+        if args.saved_networks or args.profile_uuid:
+            activate_saved_networks(args, nm)
+        else:
+            password = sys.stdin.readline().rstrip("\r\n")
+            connect(args, password, nm)
     except WifiFailure as exc:
         print(f"PINS_WIFI_RESULT code={exc.code} message={exc.safe_message}")
         return 1

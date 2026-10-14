@@ -255,7 +255,7 @@ Connect to a specific Wi-Fi network. If connection fails, it automatically rever
 
 Runtime behavior:
 - The timer watchdog is the single owner of automatic recovery and fallback decisions. The NetworkManager dispatcher hook (`90-pins-wifi-recovery`) only persists a successful manual/VNC client activation that leaves single-radio hotspot-only mode; it never launches reconnect or hotspot commands from a NetworkManager callback.
-- PINS-managed client Wi-Fi profiles use NetworkManager autoconnect priority `100`; the fallback hotspot uses priority `0`. On boot, an available saved client network therefore wins. Startup management and the watchdog still activate the hotspot explicitly when client connectivity is unavailable, so fallback behavior does not depend on autoconnect priority.
+- New PINS-managed client Wi-Fi profiles default to NetworkManager autoconnect priority `100`; the fallback hotspot defaults to `0`. Existing priorities are preserved during reconnection and package upgrades. Startup keeps a healthy active client connection; otherwise it tries enabled saved client profiles on the selected adapter in descending priority and last-used order before activating hotspot fallback. Hidden profiles remain eligible even when absent from scans.
 - NetworkManager is the only durable owner of client credentials. The password is transported to the privileged connection job over stdin, is never written to `wifi_config.json`, and is not included in job commands or logs.
 - New client profiles use deterministic PINS connection IDs and UUIDs. Automatic recovery activates the saved UUID only; it never retries a secured network without a stored NetworkManager secret.
 - `wifi_config.json` is updated atomically only after the requested profile is active on the selected client interface and has an IPv4 address. A failed request keeps the previous desired network and rolls back to the hotspot.
@@ -335,10 +335,39 @@ Network intent is persisted separately from observed NetworkManager state.
   }
   ```
 
-`auto` tries the saved auto-connect SSID and falls back to the hotspot. Once the
-fallback hotspot is active, recovery checks leave it active instead of repeatedly
-taking a single radio away from connected field clients. `hotspot` skips client
-reconnection and continuously reconciles toward the AP state.
+`auto` uses NetworkManager's saved profiles and their `connection.autoconnect`
+and `connection.autoconnect-priority` settings, rather than one JSON SSID. The
+legacy SSID/profile fields remain for older clients. A healthy active client is
+kept even if a different saved network has a higher priority. Unavailable visible
+networks are skipped after scanning; hidden profiles can still be attempted.
+
+The watchdog retries saved networks with a 120-second cooldown after hotspot
+fallback. On a single adapter it only retries when station inspection succeeds
+and no devices are associated with the AP; with separate client/hotspot adapters
+it can retry without disconnecting AP clients. Explicitly selecting `auto` also
+retries saved networks, including while AP clients are connected, so manual
+retries may interrupt access on a single adapter. `hotspot` skips client retries.
+
+### Saved Wi-Fi networks
+
+- `GET /wifi/networks`: authenticated list of saved infrastructure profiles with
+  `uuid`, `name`, `ssid`, `interface`, `compatible`, `auto_connect`, `priority`,
+  `last_connected`, `hidden`, `band`, and `connected`. No credentials are returned.
+- `PUT /wifi/networks/{uuid}`: accepts `priority` (integer, -999 through 999)
+  and/or `auto_connect` (boolean). Returns a `JobResponse`; settings apply to
+  future selection without interrupting an active connection.
+- `POST /wifi/networks/{uuid}/connect`: activates that saved profile using its
+  existing credentials, band, and preferences. Returns a `JobResponse` and rolls
+  back to hotspot on failure. Disabled auto-connect remains disabled.
+- `DELETE /wifi/networks/{uuid}`: forgets a saved client profile and its credentials
+  through a job. Active client profiles return `409`; AP profiles are excluded.
+
+Profiles are identified by UUID, so duplicate SSIDs and desktop-created networks
+can be managed independently. The privileged `pins-wifi-networks.py` facade only
+permits listing/editing/forgetting client profiles and cannot provision secrets
+or write arbitrary configuration paths. Mutations share the Wi-Fi coordination
+lock. `POST /wifi/connect` additionally accepts an optional `priority`; omitted
+priorities preserve existing preferences or use the new-profile default.
 
 ### 9. Wi-Fi Auto-Connect
 

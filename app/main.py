@@ -76,6 +76,7 @@ if not os.path.exists(DEFAULT_WIFI_AUTOMANAGE_SCRIPT):
 
 WIFI_AUTOMANAGE_SCRIPT_PATH = os.getenv("WIFI_AUTOMANAGE_SCRIPT_PATH", DEFAULT_WIFI_AUTOMANAGE_SCRIPT)
 WIFI_CONNECT_SCRIPT_PATH = os.getenv("WIFI_CONNECT_SCRIPT_PATH", "/usr/local/bin/wifi-connect.sh")
+WIFI_PROFILE_SCRIPT_PATH = os.getenv("WIFI_NETWORKS_SCRIPT_PATH", "/usr/local/bin/pins-wifi-networks.py")
 LOCALIZATION_SCRIPT_PATH = os.getenv(
     "LOCALIZATION_SCRIPT_PATH", "/usr/local/bin/manage-localization.sh"
 )
@@ -235,6 +236,27 @@ class WifiConnectRequest(BaseModel):
     band: Optional[str] = None # "2.4GHz" or "5GHz"
     client_interface: Optional[str] = None
     hotspot_interface: Optional[str] = None
+    priority: Optional[StrictInt] = Field(default=None, ge=-999, le=999)
+
+
+class WifiSavedNetworkUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    auto_connect: Optional[bool] = None
+    priority: Optional[StrictInt] = Field(default=None, ge=-999, le=999)
+
+
+class WifiSavedNetwork(BaseModel):
+    uuid: str
+    name: str
+    ssid: str
+    interface: Optional[str] = None
+    compatible: bool
+    auto_connect: bool
+    priority: int
+    last_connected: int
+    hidden: bool
+    band: str
+    connected: bool
 
 class WifiAutoConnectRequest(BaseModel):
     ssid: Optional[str] = None
@@ -2588,6 +2610,86 @@ async def list_wifi_adapters():
     return WifiAdaptersResponse(adapters=adapters)
 
 
+async def _run_wifi_profile_helper(*args: str):
+    process = await asyncio.create_subprocess_exec(
+        "sudo", "-n", WIFI_PROFILE_SCRIPT_PATH, *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=90)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise HTTPException(status_code=504, detail="Saved Wi-Fi operation timed out")
+    if process.returncode:
+        raise HTTPException(status_code=503, detail="Saved Wi-Fi operation failed")
+    return stdout.decode("utf-8")
+
+
+@app.get("/wifi/networks", response_model=Dict[str, List[WifiSavedNetwork]], dependencies=[Depends(verify_token)])
+async def get_saved_wifi_networks():
+    client, _ = await _resolve_wifi_interfaces()
+    try:
+        return json.loads(await _run_wifi_profile_helper("--action", "list", "--client-iface", client))
+    except (OSError, ValueError):
+        raise HTTPException(status_code=503, detail="Saved Wi-Fi networks are unavailable")
+
+
+async def _saved_wifi_network(profile_uuid: uuid.UUID):
+    listing = await get_saved_wifi_networks()
+    network = next((n for n in listing["networks"] if n["uuid"] == str(profile_uuid)), None)
+    if network is None:
+        raise HTTPException(status_code=404, detail="Saved Wi-Fi network not found")
+    return network
+
+
+async def _start_saved_wifi_job(command):
+    job_id = await job_manager.start_job(command)
+    job = job_manager.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=500, detail="Saved Wi-Fi job was not created")
+    return _job_response_from_runtime_job(job)
+
+
+@app.put("/wifi/networks/{profile_uuid}", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def update_saved_wifi_network(profile_uuid: uuid.UUID, request: WifiSavedNetworkUpdate):
+    await _saved_wifi_network(profile_uuid)
+    if request.priority is None and request.auto_connect is None:
+        raise HTTPException(status_code=400, detail="Provide priority or auto_connect")
+    client, _ = await _resolve_wifi_interfaces()
+    command = ["sudo", "-n", WIFI_PROFILE_SCRIPT_PATH, "--action", "update",
+               "--profile-uuid", str(profile_uuid), "--client-iface", client]
+    if request.priority is not None:
+        command.extend(["--priority", str(request.priority)])
+    if request.auto_connect is not None:
+        command.extend(["--auto-connect", "yes" if request.auto_connect else "no"])
+    return await _start_saved_wifi_job(command)
+
+
+@app.delete("/wifi/networks/{profile_uuid}", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def forget_saved_wifi_network(profile_uuid: uuid.UUID):
+    network = await _saved_wifi_network(profile_uuid)
+    if network["connected"]:
+        raise HTTPException(status_code=409, detail="Disconnect before forgetting the active network")
+    client, _ = await _resolve_wifi_interfaces()
+    return await _start_saved_wifi_job([
+        "sudo", "-n", WIFI_PROFILE_SCRIPT_PATH, "--action", "forget",
+        "--profile-uuid", str(profile_uuid), "--client-iface", client,
+    ])
+
+
+@app.post("/wifi/networks/{profile_uuid}/connect", response_model=JobResponse, dependencies=[Depends(verify_token)])
+async def connect_saved_wifi_network(profile_uuid: uuid.UUID):
+    network = await _saved_wifi_network(profile_uuid)
+    if not network["compatible"]:
+        raise HTTPException(status_code=400, detail="Network belongs to another Wi-Fi adapter")
+    client, hotspot = await _resolve_wifi_interfaces()
+    return await _start_saved_wifi_job([
+        "sudo", "-n", WIFI_CONNECT_SCRIPT_PATH, "--profile-uuid", str(profile_uuid),
+        "--client-iface", client, "--hotspot-iface", hotspot,
+    ])
+
+
 async def _start_network_mode_job(desired_mode: str):
     client_interface, hotspot_interface = await _resolve_wifi_interfaces()
     if desired_mode == NETWORK_MODE_HOTSPOT:
@@ -2743,6 +2845,10 @@ async def connect_wifi(request: WifiConnectRequest):
         cmd.extend(["--band", wifi_band])
         masked_cmd.extend(["--band", wifi_band])
 
+    if request.priority is not None:
+        cmd.extend(["--priority", str(request.priority)])
+        masked_cmd.extend(["--priority", str(request.priority)])
+
     # Persist only the reconciled hardware roles before the job. The desired
     # SSID/profile remains transactional and is committed by the privileged
     # profile manager only after activation and IPv4 postconditions succeed.
@@ -2877,7 +2983,18 @@ async def set_wifi_auto_connect(config: WifiAutoConnectRequest):
     
     if config.auto_connect and not new_ssid:
         raise HTTPException(status_code=400, detail="SSID is required when enabling auto-connect")
-        
+
+    # Legacy clients still configure one SSID. Apply that choice to its saved
+    # NetworkManager profile so the new selection policy respects the setting.
+    listing = await get_saved_wifi_networks()
+    matches = [n for n in listing["networks"] if n["ssid"] == new_ssid and n["compatible"]]
+    if not matches:
+        raise HTTPException(status_code=404, detail="Connect and save this network first")
+    preferred_uuid = current.get("client_profile_uuid")
+    selected = next((n for n in matches if n["uuid"] == preferred_uuid), matches[0])
+    client, _ = await _resolve_wifi_interfaces()
+    await _run_wifi_profile_helper("--action", "update", "--profile-uuid", selected["uuid"],
+                                   "--client-iface", client, "--auto-connect", "yes" if config.auto_connect else "no")
     save_wifi_config(new_ssid, config.auto_connect, config.band)
     return {"status": "success", "message": "Wifi auto-connect configuration saved", "config": {"ssid": new_ssid, "auto_connect": config.auto_connect, "band": config.band}}
 

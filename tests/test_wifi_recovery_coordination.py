@@ -133,9 +133,7 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         )
         self.assertIn('"connection.autoconnect-priority", str(CLIENT_AUTOCONNECT_PRIORITY)', profile_manager)
         self.assertNotIn('connection.autoconnect-priority 100 || true', source)
-        self.assertIn('profile_mode" = "ap"', postinst)
-        self.assertIn("connection.autoconnect-priority 0", postinst)
-        self.assertIn("connection.autoconnect-priority 100", postinst)
+        self.assertNotIn("connection.autoconnect-priority", postinst)
 
     def test_single_adapter_hotspot_is_stopped_before_client_scan(self):
         source = self.read(WIFI_CONNECT)

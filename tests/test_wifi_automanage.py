@@ -36,11 +36,14 @@ class WifiAutomanageTests(unittest.TestCase):
         ), patch.object(wifi_automanage, "connect_to_wifi", return_value=True) as connect, patch.object(
             wifi_automanage, "start_hotspot"
         ) as start_hotspot:
-            with self.assertRaises(SystemExit) as exit_context:
+            with patch.object(wifi_automanage, "client_is_healthy", return_value=False), patch.object(
+                wifi_automanage, "saved_client_networks", return_value=[{"uuid": "saved"}]
+            ), patch.object(wifi_automanage, "remember_attempt"), patch.object(
+                wifi_automanage, "connect_saved_networks", return_value=True
+            ) as saved_connect:
                 wifi_automanage.main()
-
-        self.assertEqual(exit_context.exception.code, 0)
-        connect.assert_called_once_with("Home WiFi", "5GHz", "wlan0", "wlan0")
+        saved_connect.assert_called_once_with("wlan0", "wlan0")
+        connect.assert_not_called()
         start_hotspot.assert_not_called()
 
     def test_failed_saved_profile_activation_falls_back_to_hotspot(self):
@@ -56,9 +59,15 @@ class WifiAutomanageTests(unittest.TestCase):
         ), patch.object(wifi_automanage, "connect_to_wifi", return_value=False) as connect, patch.object(
             wifi_automanage, "start_hotspot"
         ) as start_hotspot:
-            wifi_automanage.main()
+            with patch.object(wifi_automanage, "client_is_healthy", return_value=False), patch.object(
+                wifi_automanage, "saved_client_networks", return_value=[{"uuid": "saved"}]
+            ), patch.object(wifi_automanage, "remember_attempt"), patch.object(
+                wifi_automanage, "connect_saved_networks", return_value=False
+            ) as saved_connect:
+                wifi_automanage.main()
 
-        connect.assert_called_once_with("Unavailable WiFi", None, "wlan0", "wlan0")
+        saved_connect.assert_called_once_with("wlan0", "wlan0")
+        connect.assert_not_called()
         start_hotspot.assert_called_once_with("wlan0", "wlan0")
 
     def test_existing_verified_hotspot_is_not_recreated(self):
