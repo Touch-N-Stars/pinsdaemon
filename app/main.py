@@ -127,6 +127,7 @@ AVAILABLE_PLUGIN_PACKAGES = [
     "pins-plugin-groundstation",
     "pins-plugin-joko",
     "pins-plugin-livestack",
+    "pins-plugin-luckycapture",
     "pins-plugin-nightsummary",
     "pins-plugin-ninaapi",
     "pins-plugin-orbitals",
