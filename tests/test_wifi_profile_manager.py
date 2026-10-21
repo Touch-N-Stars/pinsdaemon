@@ -29,6 +29,111 @@ class FakeNmcli:
         return wifi.CommandResult(0, "", "")
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class ActivationTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        for name in ("monotonic", "sleep"):
+            patcher = patch.object(wifi.time, name, getattr(self.clock, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_ipv6_first_activation_waits_for_ipv4_for_new_and_saved_profiles(self):
+        for password_supplied in (True, False):
+            with self.subTest(password_supplied=password_supplied):
+                nm = FakeNmcli([
+                    wifi.CommandResult(0),
+                    wifi.CommandResult(0, "profile-uuid\n"),
+                    wifi.CommandResult(0, "profile-uuid\n\n"),
+                    wifi.CommandResult(0, "profile-uuid\n192.168.1.20/24\n"),
+                ])
+                started = self.clock.now
+                wifi._activate(nm, "profile-uuid", "wlan0", password_supplied)
+                self.assertEqual(self.clock.now - started, 2)
+                self.assertEqual(len(nm.calls), 4)
+                self.assertFalse(nm.results)
+
+    def test_ipv4_wait_expires_without_real_sleep(self):
+        nm = FakeNmcli([wifi.CommandResult(0)] + [
+            wifi.CommandResult(0, "profile-uuid\n")
+        ] * wifi.IPV4_READY_TIMEOUT_SECONDS)
+        with self.assertRaises(wifi.WifiFailure) as raised:
+            wifi._activate(nm, "profile-uuid", "wlan0", False)
+        self.assertEqual(raised.exception.code, "IP_CONFIGURATION_FAILED")
+        self.assertEqual(raised.exception.safe_message, "Client_has_no_IPv4_address")
+        self.assertEqual(self.clock.now, wifi.IPV4_READY_TIMEOUT_SECONDS)
+        self.assertFalse(nm.results)
+
+    def test_profile_loss_during_ipv4_wait_stops_immediately(self):
+        for final in (
+            wifi.CommandResult(0, "other-profile\n192.168.1.20/24\n"),
+            wifi.CommandResult(0, "\n"),
+            wifi.CommandResult(10, "", "Device unavailable"),
+        ):
+            with self.subTest(final=final):
+                nm = FakeNmcli([
+                    wifi.CommandResult(0),
+                    wifi.CommandResult(0, "profile-uuid\n"),
+                    final,
+                ])
+                started = self.clock.now
+                with self.assertRaises(wifi.WifiFailure) as raised:
+                    wifi._activate(nm, "profile-uuid", "wlan0", False)
+                self.assertEqual(raised.exception.code, "ASSOCIATION_FAILED")
+                self.assertEqual(self.clock.now - started, 1)
+                self.assertFalse(nm.results)
+
+    def test_probe_timeout_is_limited_by_remaining_ipv4_wait(self):
+        nm = FakeNmcli()
+        timeouts = []
+
+        def run(args, timeout=60):
+            if args[0] == "--wait":
+                return wifi.CommandResult(0)
+            timeouts.append(timeout)
+            self.clock.now += timeout
+            return wifi.CommandResult(0, "profile-uuid\n")
+
+        nm.run = run
+        with self.assertRaises(wifi.WifiFailure) as raised:
+            wifi._activate(nm, "profile-uuid", "wlan0", False)
+        self.assertEqual(raised.exception.code, "IP_CONFIGURATION_FAILED")
+        self.assertEqual(self.clock.now, wifi.IPV4_READY_TIMEOUT_SECONDS)
+        self.assertLessEqual(max(timeouts), 5)
+        self.assertEqual(timeouts[-1], 3)
+
+    def test_failed_activation_does_not_enter_ipv4_wait(self):
+        nm = FakeNmcli([wifi.CommandResult(4, "", "IP configuration failed")])
+        with self.assertRaises(wifi.WifiFailure) as raised:
+            wifi._activate(nm, "profile-uuid", "wlan0", True)
+        self.assertEqual(raised.exception.code, "IP_CONFIGURATION_FAILED")
+        self.assertEqual(len(nm.calls), 1)
+        self.assertEqual(self.clock.now, 0)
+
+    def test_new_candidate_and_permanent_profiles_require_ipv4(self):
+        for auto_connect in (False, True):
+            with self.subTest(auto_connect=auto_connect):
+                nm = FakeNmcli()
+                wifi._create_profile(
+                    nm, profile_id="test", profile_uuid="profile-uuid",
+                    ssid="Home", interface="wlan0", password="test-password",
+                    secured=True, band="", auto_connect=auto_connect,
+                )
+                settings = nm.calls[1]
+                self.assertEqual(settings[settings.index("ipv4.method") + 1], "auto")
+                self.assertEqual(settings[settings.index("ipv4.may-fail") + 1], "no")
+
+
 class WifiProfileIdentityTests(unittest.TestCase):
     def test_managed_profile_identity_is_deterministic_and_not_the_ssid(self):
         first = wifi.profile_identity("Field Network")
@@ -319,6 +424,36 @@ class SavedProfileTests(unittest.TestCase):
 
 
 class TransactionTests(unittest.TestCase):
+    def test_ipv4_timeout_removes_candidate_and_preserves_previous_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "wifi.json"
+            original = {"ssid": "Old", "auto_connect": True, "client_profile_uuid": "old"}
+            path.write_text(json.dumps(original), encoding="utf-8")
+            args = SimpleNamespace(
+                config_file=str(path), client_iface="wlan0", hotspot_iface="wlan0",
+                ssid="New", band="", auto_connect=True,
+            )
+            clock = FakeClock()
+            nm = FakeNmcli([wifi.CommandResult(0), wifi.CommandResult(0)] + [
+                wifi.CommandResult(0, "candidate-uuid\n")
+            ] * wifi.IPV4_READY_TIMEOUT_SECONDS)
+            with patch.object(wifi, "_scan_security", return_value="WPA2"), patch.object(
+                wifi, "_profile_value", return_value=""
+            ), patch.object(wifi, "_create_profile"), patch.object(
+                wifi.uuid, "uuid4", return_value="candidate-uuid"
+            ), patch.object(wifi.time, "monotonic", clock.monotonic), patch.object(
+                wifi.time, "sleep", clock.sleep
+            ), patch.object(wifi, "_delete_profile") as delete, patch.object(
+                wifi, "_verify_connection_commit"
+            ) as verify:
+                with self.assertRaises(wifi.WifiFailure) as raised:
+                    wifi.connect(args, "test-password", nm)
+            self.assertEqual(raised.exception.code, "IP_CONFIGURATION_FAILED")
+            self.assertEqual(clock.now, wifi.IPV4_READY_TIMEOUT_SECONDS)
+            delete.assert_called_once_with(nm, "candidate-uuid")
+            verify.assert_not_called()
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), original)
+
     def test_failed_new_secure_connection_does_not_persist_config(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "wifi.json"

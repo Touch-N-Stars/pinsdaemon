@@ -34,6 +34,7 @@ PEER_STATE_FILE = os.environ.get(
 PROFILE_NAMESPACE = uuid.UUID("4db788e1-dd38-4a11-98ba-342264f0506c")
 IFACE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 VALID_BANDS = {"", "a", "bg"}
+IPV4_READY_TIMEOUT_SECONDS = 45
 try:
     CLIENT_AUTOCONNECT_PRIORITY = int(os.environ.get("PINS_CLIENT_AUTOCONNECT_PRIORITY", "100"))
 except ValueError:
@@ -69,7 +70,7 @@ class WifiFailure(Exception):
 
 
 class Nmcli:
-    def run(self, args: Iterable[str], *, timeout: int = 60) -> CommandResult:
+    def run(self, args: Iterable[str], *, timeout: float = 60) -> CommandResult:
         try:
             proc = subprocess.run(
                 ["nmcli", *args],
@@ -297,12 +298,25 @@ def _activate(nm: Nmcli, profile_uuid: str, interface: str, password_supplied: b
     result = nm.run(["--wait", "60", "connection", "up", "uuid", profile_uuid, "ifname", interface], timeout=70)
     if result.returncode != 0:
         raise _classify_activation(result, password_supplied)
-    active = nm.run(["-g", "GENERAL.CON-UUID,IP4.ADDRESS", "device", "show", interface])
-    lines = [line.strip() for line in active.stdout.splitlines() if line.strip()]
-    if active.returncode != 0 or not lines or lines[0] != profile_uuid:
-        raise WifiFailure("ASSOCIATION_FAILED", "Activated_profile_is_not_active_on_interface")
-    if not any("/" in line for line in lines[1:]):
-        raise WifiFailure("IP_CONFIGURATION_FAILED", "Client_has_no_IPv4_address")
+    # Existing profiles may allow activation as soon as IPv6 is ready while
+    # DHCPv4 is still running. Keep the profile alive for a bounded IPv4 wait.
+    deadline = time.monotonic() + IPV4_READY_TIMEOUT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise WifiFailure("IP_CONFIGURATION_FAILED", "Client_has_no_IPv4_address")
+        active = nm.run(
+            ["-g", "GENERAL.CON-UUID,IP4.ADDRESS", "device", "show", interface],
+            timeout=min(5, remaining),
+        )
+        lines = [line.strip() for line in active.stdout.splitlines() if line.strip()]
+        if active.returncode != 0 or not lines or lines[0] != profile_uuid:
+            raise WifiFailure("ASSOCIATION_FAILED", "Activated_profile_is_not_active_on_interface")
+        if any("/" in line for line in lines[1:]):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(1, remaining))
 
 
 def _run_viability_check(interface: str) -> tuple[subprocess.CompletedProcess[str], str]:
@@ -542,6 +556,7 @@ def _create_profile(
         "connection.autoconnect-priority", str(CLIENT_AUTOCONNECT_PRIORITY),
         "802-11-wireless.powersave", "2",
         "ipv4.method", "auto",
+        "ipv4.may-fail", "no",
     ]
     if band:
         settings.extend(["802-11-wireless.band", band])
