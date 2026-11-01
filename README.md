@@ -4,6 +4,8 @@ A lightweight, secure, Python-based daemon designed for the Raspberry Pi to expo
 
 ## Features
 
+For planned hotspot work, see the [hotspot improvement agent guide](docs/HOTSPOT_IMPROVEMENT_AGENT_GUIDE.md), including shared-radio constraints, implementation phases, and verification requirements.
+
 - **System Updates**: Trigger the packaged, systemd-backed PINS upgrade workflow remotely.
 - **Firmware Management**: Upload versioned firmware archives and install contained `.deb` packages asynchronously.
 - **ASTAP Star Database Management**: List and install supported ASTAP star databases (D50, D05, G05, W08) for Raspberry Pi 64-bit.
