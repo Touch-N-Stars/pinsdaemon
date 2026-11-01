@@ -466,6 +466,18 @@ enable_hotspot() {
     HOTSPOT_BAND="$(get_hotspot_band)"
     HOTSPOT_CHANNEL="$(get_hotspot_channel)"
 
+    # Use a phone-compatible default when no explicit radio settings exist.
+    # A channel-only legacy configuration still lets NM infer its band.
+    if [ -z "$HOTSPOT_BAND" ] && [ -z "$HOTSPOT_CHANNEL" ]; then
+        HOTSPOT_BAND="bg"
+        HOTSPOT_CHANNEL="6"
+    elif [ "$HOTSPOT_BAND" = "bg" ] && [ -z "$HOTSPOT_CHANNEL" ]; then
+        HOTSPOT_CHANNEL="6"
+    fi
+    local -a hotspot_radio_args=()
+    [ -z "$HOTSPOT_BAND" ] || hotspot_radio_args+=(802-11-wireless.band "$HOTSPOT_BAND")
+    [ -z "$HOTSPOT_CHANNEL" ] || hotspot_radio_args+=(802-11-wireless.channel "$HOTSPOT_CHANNEL")
+
     echo "Creating hotspot: $HOTSPOT_SSID"
 
     # Build the complete AP profile before activating it. The nmcli hotspot
@@ -483,20 +495,17 @@ enable_hotspot() {
         connection.autoconnect-priority "$HOTSPOT_AUTOCONNECT_PRIORITY" \
         802-11-wireless.mode ap \
         802-11-wireless.powersave 2 \
+        "${hotspot_radio_args[@]}" \
         ipv4.method shared \
         ipv4.addresses "$HOTSPOT_IPV4_CIDR" \
         ipv6.method disabled \
         wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.proto rsn \
+        wifi-sec.pairwise ccmp \
+        wifi-sec.group ccmp \
         wifi-sec.psk "$HOTSPOT_PASSWORD" >/dev/null; then
         echo "Failed to create configured hotspot profile."
         return 1
-    fi
-
-    if [ -n "$HOTSPOT_BAND" ]; then
-        nmcli connection modify uuid "$HOTSPOT_PROFILE_UUID" 802-11-wireless.band "$HOTSPOT_BAND" || true
-    fi
-    if [ -n "$HOTSPOT_CHANNEL" ]; then
-        nmcli connection modify uuid "$HOTSPOT_PROFILE_UUID" 802-11-wireless.channel "$HOTSPOT_CHANNEL" || true
     fi
 
     for attempt in 1 2 3; do
