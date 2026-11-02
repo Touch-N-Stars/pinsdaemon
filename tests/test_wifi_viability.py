@@ -23,6 +23,7 @@ class FakeProbe:
         snapshot=True,
         gateway=None,
         gateway_reachable=True,
+        arp_reachable=False,
         dhcp_server="10.42.0.1",
         peer_rig_id="pins-host",
         local_addresses=(),
@@ -38,6 +39,8 @@ class FakeProbe:
         )
         self.gateway = ipaddress.IPv4Address(gateway) if gateway else None
         self.gateway_reachable = gateway_reachable
+        self.arp_reachable = arp_reachable
+        self.arp_requests = 0
         self.server = ipaddress.IPv4Address(dhcp_server) if dhcp_server else None
         self.peer_rig_id = peer_rig_id
         self.local_addresses = {
@@ -58,6 +61,10 @@ class FakeProbe:
 
     def dhcp_server(self, _interface):
         return self.server
+
+    def arp_gateway(self, _interface, _gateway, _timeout):
+        self.arp_requests += 1
+        return self.arp_reachable
 
     def local_ipv4_addresses(self):
         return self.local_addresses
@@ -103,6 +110,44 @@ class ScriptedSystemProbe(viability.SystemProbe):
 
 
 class WifiViabilityTests(unittest.TestCase):
+    def test_icmp_filtered_router_with_fresh_arp_reply_stays_healthy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = FakeProbe(gateway="10.42.0.1", gateway_reachable=False, arp_reachable=True)
+            result = self.evaluate(probe, Path(directory) / "peer", Path(directory) / "rig")
+        self.assertTrue(result.healthy)
+        self.assertEqual(result.reason, "gateway_arp_reachable")
+        self.assertEqual(probe.arp_requests, 1)
+        self.assertEqual(probe.health_requests, 0)
+
+    def test_arp_cannot_accept_inactive_offlink_or_local_gateway(self):
+        for options in (
+            {"snapshot": False, "gateway": "10.42.0.1"},
+            {"gateway": "192.168.1.1"},
+            {"gateway": "10.42.0.38"},
+            {"gateway": "10.42.0.1", "local_addresses": ("10.42.0.1",)},
+        ):
+            with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
+                probe = FakeProbe(**options, gateway_reachable=False, arp_reachable=True)
+                result = self.evaluate(probe, Path(directory) / "peer", Path(directory) / "rig")
+                self.assertFalse(result.healthy)
+                self.assertEqual(probe.arp_requests, 0)
+
+    def test_dead_onlink_gateway_still_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = FakeProbe(gateway="10.42.0.1", gateway_reachable=False)
+            result = self.evaluate(probe, Path(directory) / "peer", Path(directory) / "rig")
+        self.assertFalse(result.healthy)
+        self.assertEqual(probe.arp_requests, 1)
+
+    def test_arp_probe_is_interface_bound_and_bounded_and_fails_closed(self):
+        probe = viability.SystemProbe()
+        for code in (0, 1, 124):
+            with self.subTest(code=code), patch.object(probe, "_run", return_value=viability.subprocess.CompletedProcess([], code)) as run:
+                self.assertEqual(probe.arp_gateway("wlan0", ipaddress.IPv4Address("192.168.1.1"), 2), code == 0)
+                run.assert_called_once_with(
+                    ["arping", "-q", "-f", "-I", "wlan0", "-c", "1", "-w", "2", "192.168.1.1"], timeout=4,
+                )
+
     def evaluate(self, probe, state, local_rig):
         return viability.validate_once(
             probe,

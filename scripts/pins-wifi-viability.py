@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Validate a PINS Wi-Fi client connection without weakening AP fallback.
 
-Normal networks keep the historic default-gateway ping check. A client
+Normal networks probe the default gateway with ICMP, then on-link ARP when
+the router filters ICMP. No Internet access is required. A client
 network without a default gateway is accepted only when NetworkManager shows
 an active infrastructure profile with IPv4 configuration and the DHCP server
 answers with a stable, valid pinsdaemon identity on the unauthenticated
@@ -279,6 +280,15 @@ class SystemProbe:
             self._nmcli_values("DHCP4.OPTION", "device", "show", interface)
         )
 
+    def arp_gateway(self, interface: str, gateway: ipaddress.IPv4Address, timeout: int) -> bool:
+        # Use a fresh reply, not a cached neighbour entry which may outlive a
+        # dead AP. iputils-arping is packaged explicitly; missing permissions,
+        # tools and timeouts all fail closed through _run.
+        return self._run(
+            ["arping", "-q", "-f", "-I", interface, "-c", "1", "-w", str(timeout), str(gateway)],
+            timeout=timeout + 2,
+        ).returncode == 0
+
     def local_ipv4_addresses(self) -> set[ipaddress.IPv4Address]:
         result = self._run(["ip", "-4", "-o", "address", "show"])
         if result.returncode != 0:
@@ -420,6 +430,17 @@ def validate_once(
             return ValidationResult("healthy", "gateway", "gateway_present")
         if probe.ping_gateway(interface, gateway, ping_timeout):
             return ValidationResult("healthy", "gateway", "gateway_reachable")
+        snapshot = probe.client_snapshot(interface)
+        if snapshot is not None and any(
+            gateway in address.network and gateway != address.ip
+            for address in snapshot.addresses
+        ):
+            try:
+                local_addresses = probe.local_ipv4_addresses()
+            except ProbeFailure:
+                local_addresses = {gateway}  # Cannot exclude a local/self reply.
+            if gateway not in local_addresses and probe.arp_gateway(interface, gateway, ping_timeout):
+                return ValidationResult("healthy", "gateway", "gateway_arp_reachable")
         return ValidationResult("unhealthy", "gateway", "gateway_unreachable")
 
     snapshot = probe.client_snapshot(interface)
