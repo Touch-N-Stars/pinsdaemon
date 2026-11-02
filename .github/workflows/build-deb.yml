@@ -29,7 +29,13 @@ jobs:
     - name: Validate Wi-Fi recovery and shell scripts
       run: |
         python -m unittest discover -s tests -p 'test_*.py' -v
-        bash -n scripts/*.sh scripts/pins-rig-name scripts/90-pins-wifi-recovery packaging/DEBIAN/postinst packaging/DEBIAN/prerm
+        for script in scripts/*.sh scripts/pins-rig-name scripts/90-pins-wifi-recovery packaging/DEBIAN/postinst packaging/DEBIAN/prerm; do
+          case "$(head -n1 "$script")" in
+            '#!/bin/sh') dash -n "$script" ;;
+            *) bash -n "$script" ;;
+          esac
+        done
+        shellcheck scripts/pins-rig-name
     
     - name: Set up directory structure
       run: |
