@@ -86,6 +86,15 @@ The Linux Touch-N-Stars plugin advertises its separate `_touchnstars._tcp`
 service and active HTTP port as a shared mDNS profile, so both discovery
 records resolve to the same hostname without creating `-2`/`-3` aliases.
 
+`pins-rig-name` uses `PINS_RIG_ID` first, then the first line of
+`/etc/pins/rig-name`, then a hardware-derived `pins-<serial5>` fallback.
+`PINS_RIG_NAME_FILE` overrides the file path. Names are normalized to lowercase
+and limited to 63 characters. The package installer calls `pins-rig-name --ensure`
+to persist this name and align the OS/mDNS hostname with it; an existing valid
+saved name survives upgrades. Wi-Fi setup also uses it as the default hotspot
+SSID. To preserve a chosen name on upgrade, save it in `/etc/pins/rig-name`;
+changing only the OS hostname does not update this file.
+
 ## API Endpoints
 
 All HTTP endpoints except `GET /health` require the

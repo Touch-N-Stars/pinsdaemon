@@ -234,7 +234,9 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
         rig_name = self.read(REPO_ROOT / "scripts" / "pins-rig-name")
 
         self.assertIn("cp scripts/pins-rig-name build/usr/local/bin/", workflow)
-        self.assertIn("bash -n scripts/*.sh scripts/pins-rig-name", workflow)
+        self.assertIn("for script in scripts/*.sh scripts/pins-rig-name", workflow)
+        self.assertIn("'#!/bin/sh') dash -n", workflow)
+        self.assertIn("shellcheck scripts/pins-rig-name", workflow)
         self.assertIn('HOTSPOT_SSID="$("$RIG_NAME_COMMAND")"', wifi_connect)
         self.assertIn("/usr/local/bin/pins-rig-name --ensure", postinst)
         self.assertIn('hostnamectl set-hostname "$PINS_RIG_NAME"', postinst)
