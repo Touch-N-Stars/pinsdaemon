@@ -2697,6 +2697,15 @@ class NotificationSettingsUpdate(BaseModel):
 class NotificationTestRequest(BaseModel):
     severity: Literal["info", "success", "warning", "error"] = "info"
     message: str = Field(default="Test notification from PINS", max_length=500)
+    # Lets the user put the app in the background first: the phone only shows
+    # notifications while Touch-N-Stars is not in the foreground.
+    delaySeconds: int = Field(default=0, ge=0, le=60)
+
+
+class NotificationTestResponse(BaseModel):
+    delaySeconds: int
+    # Set when the event was published immediately (delaySeconds == 0).
+    event: Optional[NotificationEvent] = None
 
 
 def _notifications_response(since: int, limit: int) -> NotificationsResponse:
@@ -2746,15 +2755,32 @@ async def update_notification_settings(update: NotificationSettingsUpdate):
     return NotificationSettings(**public_config(config))
 
 
-@app.post("/notifications/test", response_model=NotificationEvent, dependencies=[Depends(verify_token)])
+_notify_test_tasks: set = set()
+
+
+@app.post("/notifications/test", response_model=NotificationTestResponse, dependencies=[Depends(verify_token)])
 async def send_test_notification(request: NotificationTestRequest):
     """Publish a test event to every listener and, if configured, ntfy."""
     if not notify_relay.config.get("enabled", True):
         raise HTTPException(status_code=409, detail="Notifications are disabled")
-    event = notify_relay.publish(
-        request.severity, "system", request.message, title="Test", code="system.test"
-    )
-    return NotificationEvent(**event.to_dict())
+
+    def publish():
+        return notify_relay.publish(
+            request.severity, "system", request.message, title="Test", code="system.test"
+        )
+
+    if request.delaySeconds == 0:
+        event = publish()
+        return NotificationTestResponse(delaySeconds=0, event=NotificationEvent(**event.to_dict()))
+
+    async def publish_later():
+        await asyncio.sleep(request.delaySeconds)
+        publish()
+
+    task = asyncio.create_task(publish_later())
+    _notify_test_tasks.add(task)
+    task.add_done_callback(_notify_test_tasks.discard)
+    return NotificationTestResponse(delaySeconds=request.delaySeconds)
 
 
 @app.websocket("/notifications/stream")

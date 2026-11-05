@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -297,8 +297,25 @@ class NotificationApiTests(unittest.TestCase):
     def test_test_notification(self):
         response = self.client.post("/notifications/test", headers=HEADERS, json={"severity": "warning"})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["severity"], "warning")
+        self.assertEqual(response.json()["event"]["severity"], "warning")
         self.assertEqual(self.relay.last_seq, 1)
+
+    def test_delayed_test_notification_is_scheduled(self):
+        scheduled = []
+
+        def fake_create_task(coroutine):
+            scheduled.append(coroutine)
+            coroutine.close()  # not awaited: the test only checks that it was scheduled
+            return MagicMock()
+
+        with patch.object(main.asyncio, "create_task", side_effect=fake_create_task):
+            response = self.client.post("/notifications/test", headers=HEADERS, json={"delaySeconds": 10})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(self.relay.last_seq, 0)
+        self.assertEqual(response.json(), {"delaySeconds": 10, "event": None})
+        bad = self.client.post("/notifications/test", headers=HEADERS, json={"delaySeconds": 600})
+        self.assertEqual(bad.status_code, 422)
 
     def test_stream_rejects_bad_token(self):
         from starlette.websockets import WebSocketDisconnect

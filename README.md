@@ -1006,8 +1006,10 @@ Host checks run every 60 s and alert once per incident (temperature with a 5 °C
   `ntfy.token` is write-only: send it in `PUT` to set it, `""` to clear it, or omit it to keep
   the stored one. `GET` only reports `hasToken`. Settings are stored in
   `app/notify_config.json` (mode `0600`).
-- **Test**: `POST /notifications/test` with `{ "severity": "warning", "message": "..." }`
-  publishes a test event to every listener and, if enabled, to ntfy.
+- **Test**: `POST /notifications/test` with `{ "severity": "warning", "message": "...", "delaySeconds": 10 }`
+  publishes a test event to every listener and, if enabled, to ntfy. `delaySeconds` (0-60)
+  gives the user time to put the app in the background, where the phone shows it.
+  Response: `{ "delaySeconds": 10, "event": null }` (`event` is set when published at once).
 
 ntfy delivery is best effort: it only works while the Pi has internet (client Wi-Fi mode).
 Failures are not retried; the last error is kept internally for diagnostics.
