@@ -23,6 +23,7 @@ For planned hotspot work, see the [hotspot improvement agent guide](docs/HOTSPOT
   - Privileges delegated via `sudoers` (no root API access).
   - Bearer Token authentication.
 - **Real-time Feedback**: WebSocket endpoint for streaming command execution logs.
+- **Session Notifications**: Buffers PINS notifications and host alerts (under-voltage, CPU temperature, low disk space) so Touch-N-Stars can show them as phone notifications while the app is in the background, and optionally forwards them to an [ntfy](https://ntfy.sh) topic when the Pi has internet.
 
 ## High-Level Design
 
@@ -942,6 +943,74 @@ Stream live logs from a running job.
 
 - **URL**: `ws://<host>:8000/logs/{jobId}?token=<token>`
 - **Output**: Real-time text stream of stdout/stderr.
+
+---
+
+### 21. Session Notifications
+
+The daemon keeps a connection to the PINS notification hub
+(`ws://127.0.0.1:4782/hubs/notifications`) and buffers the last 500 events together with
+host alerts it detects itself. PINS broadcasts its notifications only to clients connected at
+that moment; the buffer lets Touch-N-Stars catch up after the phone slept or the app was in
+the background, and feeds its background listener.
+
+Every event carries a `seq` that grows by one per event and a `bootId` that changes when the
+daemon restarts. Clients store both and ask for `since=<last seq>`; when `bootId` differs they
+start again at `since=0`.
+
+Event:
+
+```json
+{
+  "seq": 42,
+  "severity": "error",
+  "source": "nina",
+  "title": "Mount",
+  "message": "Park failed",
+  "timestamp": 1762380000.12,
+  "code": null
+}
+```
+
+`severity` is `info`, `success`, `warning` or `error`. `source` is `nina` (from the PINS hub) or
+`system` (from the daemon). System events carry a `code`: `system.underVoltage`,
+`system.underVoltageCleared`, `system.overTemperature`, `system.lowDisk`, `system.test`.
+Host checks run every 60 s and alert once per incident (temperature with a 5 °C hysteresis).
+
+- **List**: `GET /notifications?since=<seq>&limit=<1-500>`
+  - **Response**: `{ "bootId", "lastSeq", "oldestSeq", "hubConnected", "truncated", "events": [...] }`.
+    `truncated` is `true` when events after `since` already left the buffer.
+- **Stream**: `ws://<host>:8000/notifications/stream?token=<token>&since=<seq>&bootId=<bootId>`
+  - Sends `{"kind": "hello", "bootId", "lastSeq", ...}`, then every buffered event after
+    `since` and every new one as `{"kind": "event", "event": {...}}`, and
+    `{"kind": "ping"}` every 25 s.
+- **Settings**: `GET /notifications/settings`, `PUT /notifications/settings` (partial update)
+
+  ```json
+  {
+    "enabled": true,
+    "includeNina": true,
+    "includeSystem": true,
+    "temperatureThresholdC": 80,
+    "diskFreeThresholdGb": 2,
+    "diskPath": "/",
+    "ntfy": {
+      "enabled": false,
+      "url": "https://ntfy.sh/my-rig-topic",
+      "minSeverity": "warning",
+      "hasToken": false
+    }
+  }
+  ```
+
+  `ntfy.token` is write-only: send it in `PUT` to set it, `""` to clear it, or omit it to keep
+  the stored one. `GET` only reports `hasToken`. Settings are stored in
+  `app/notify_config.json` (mode `0600`).
+- **Test**: `POST /notifications/test` with `{ "severity": "warning", "message": "..." }`
+  publishes a test event to every listener and, if enabled, to ntfy.
+
+ntfy delivery is best effort: it only works while the Pi has internet (client Wi-Fi mode).
+Failures are not retried; the last error is kept internally for diagnostics.
 
 ---
 
