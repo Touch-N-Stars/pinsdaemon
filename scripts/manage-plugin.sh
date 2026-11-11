@@ -11,6 +11,7 @@ ALLOWED_PLUGINS=(
     "pins-plugin-joko"
     "pins-plugin-livestack"
     "pins-plugin-luckycapture"
+    "pins-plugin-mlastrorpa"
     "pins-plugin-nightsummary"
     "pins-plugin-ninaapi"
     "pins-plugin-orbitals"

@@ -39,6 +39,15 @@ class PluginRegistryTests(unittest.TestCase):
         self.assertIn(package_name, available_packages)
         self.assertNotIn(package_name, protected_packages)
 
+    def test_mlastro_rpa_is_available_and_mutable(self):
+        package_name = "pins-plugin-mlastrorpa"
+
+        available_packages = set(read_literal_assignment("AVAILABLE_PLUGIN_PACKAGES"))
+        protected_packages = set(read_literal_assignment("PROTECTED_PLUGIN_PACKAGES"))
+
+        self.assertIn(package_name, available_packages)
+        self.assertNotIn(package_name, protected_packages)
+
 
 if __name__ == "__main__":
     unittest.main()
