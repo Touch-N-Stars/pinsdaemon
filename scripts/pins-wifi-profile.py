@@ -35,6 +35,8 @@ PROFILE_NAMESPACE = uuid.UUID("4db788e1-dd38-4a11-98ba-342264f0506c")
 IFACE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 VALID_BANDS = {"", "a", "bg"}
 IPV4_READY_TIMEOUT_SECONDS = 45
+SCAN_ATTEMPTS = 3
+SCAN_RETRY_DELAY_SECONDS = 2
 try:
     CLIENT_AUTOCONNECT_PRIORITY = int(os.environ.get("PINS_CLIENT_AUTOCONNECT_PRIORITY", "100"))
 except ValueError:
@@ -198,6 +200,27 @@ def manage_saved_network(args: argparse.Namespace, nm: Nmcli) -> None:
         raise WifiFailure("UNKNOWN", "Saved_network_update_failed")
 
 
+def _visible_ssids(nm: Nmcli, interface: str) -> set[str] | None:
+    """Return the SSIDs seen by a scan, or None when the scan itself failed.
+
+    Right after a single radio leaves AP mode, brcmfmac can reject scan
+    requests ("Failed to initiate AP scan") while nmcli still exits 0 with an
+    empty list. An empty result is therefore retried a few times. Where truly
+    no network is in range this only delays the hotspot fallback by seconds.
+    """
+    for attempt in range(SCAN_ATTEMPTS):
+        if attempt:
+            time.sleep(SCAN_RETRY_DELAY_SECONDS)
+        scan = nm.run(["--wait", "15", "-t", "-f", "SSID", "device", "wifi", "list",
+                       "ifname", interface, "--rescan", "yes"], timeout=20)
+        if scan.returncode != 0:
+            return None
+        visible = {_split_terse(line)[0] for line in scan.stdout.splitlines()} - {""}
+        if visible:
+            return visible
+    return set()
+
+
 def activate_saved_networks(args: argparse.Namespace, nm: Nmcli) -> str:
     networks = saved_networks(nm, args.client_iface)
     if args.profile_uuid:
@@ -206,10 +229,8 @@ def activate_saved_networks(args: argparse.Namespace, nm: Nmcli) -> str:
         networks = [n for n in networks if n["compatible"] and n["auto_connect"]]
         # The shell has already released the AP radio. A failed scan must not
         # suppress saved/hidden profiles; NetworkManager can still activate them.
-        scan = nm.run(["--wait", "15", "-t", "-f", "SSID", "device", "wifi", "list",
-                       "ifname", args.client_iface, "--rescan", "yes"], timeout=20)
-        if scan.returncode == 0:
-            visible = {_split_terse(line)[0] for line in scan.stdout.splitlines()}
+        visible = _visible_ssids(nm, args.client_iface)
+        if visible is not None:
             networks = [n for n in networks if n["ssid"] in visible or n["hidden"]]
     if not networks:
         raise WifiFailure("NETWORK_NOT_FOUND", "No_eligible_saved_network_available")
