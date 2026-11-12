@@ -13,6 +13,7 @@ import time
 import subprocess
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, Depends, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
@@ -34,6 +35,7 @@ from .wifi_config import (
     save_wifi_config,
 )
 from .hotspot_config import load_hotspot_config, save_hotspot_settings
+from .notify_relay import NotifyRelay, public_config
 from .wifi_regulatory import (
     RegulatoryError,
     find_cmdline_path,
@@ -1957,6 +1959,12 @@ async def schedule_startup_tasks() -> None:
     asyncio.create_task(_ensure_required_packages_on_startup())
     asyncio.create_task(_run_wifi_automanage_on_startup())
     asyncio.create_task(_warn_wifi_country_mismatch_on_startup())
+    notify_relay.start()
+
+
+@app.on_event("shutdown")
+async def stop_notify_relay() -> None:
+    await notify_relay.stop()
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -2603,6 +2611,229 @@ async def websocket_logs(websocket: WebSocket, job_id: str):
         try:
             await websocket.close()
         except:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Session notifications (relay for phone notifications, see app/notify_relay.py)
+# ---------------------------------------------------------------------------
+
+
+async def _notify_power_probe() -> Optional[Dict[str, Any]]:
+    try:
+        return (await _read_power_status()).model_dump()
+    except HTTPException:
+        return None
+
+
+async def _notify_temperature_probe() -> Optional[float]:
+    try:
+        return (await get_system_temperature()).celsius
+    except HTTPException:
+        return None
+
+
+notify_relay = NotifyRelay(
+    power_probe=_notify_power_probe,
+    temperature_probe=_notify_temperature_probe,
+)
+NOTIFY_STREAM_HEARTBEAT_SECONDS = 25.0
+
+
+class NotificationEvent(BaseModel):
+    seq: int
+    severity: Literal["info", "success", "warning", "error"]
+    source: Literal["nina", "system"]
+    title: str
+    message: str
+    timestamp: float
+    code: Optional[str] = None
+
+
+class NotificationsResponse(BaseModel):
+    bootId: str
+    lastSeq: int
+    oldestSeq: int
+    hubConnected: bool
+    # True when events after `since` were already dropped from the buffer.
+    truncated: bool
+    events: List[NotificationEvent]
+
+
+class NtfySettings(BaseModel):
+    enabled: bool = False
+    url: str = ""
+    minSeverity: Literal["info", "success", "warning", "error"] = "warning"
+    hasToken: bool = False
+
+
+class NotificationSettings(BaseModel):
+    enabled: bool
+    includeNina: bool
+    includeSystem: bool
+    temperatureThresholdC: float
+    diskFreeThresholdGb: float
+    diskPath: str
+    ntfy: NtfySettings
+
+
+class NtfySettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    url: Optional[str] = Field(default=None, max_length=512)
+    # Omit to keep the stored token, "" to clear it. Never returned by GET.
+    token: Optional[str] = Field(default=None, max_length=512)
+    minSeverity: Optional[Literal["info", "success", "warning", "error"]] = None
+
+
+class NotificationSettingsUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    includeNina: Optional[bool] = None
+    includeSystem: Optional[bool] = None
+    temperatureThresholdC: Optional[float] = Field(default=None, ge=40, le=110)
+    diskFreeThresholdGb: Optional[float] = Field(default=None, ge=0, le=10000)
+    diskPath: Optional[str] = Field(default=None, max_length=256)
+    ntfy: Optional[NtfySettingsUpdate] = None
+
+
+class NotificationTestRequest(BaseModel):
+    severity: Literal["info", "success", "warning", "error"] = "info"
+    message: str = Field(default="Test notification from PINS", max_length=500)
+    # Lets the user put the app in the background first: the phone only shows
+    # notifications while Touch-N-Stars is not in the foreground.
+    delaySeconds: int = Field(default=0, ge=0, le=60)
+
+
+class NotificationTestResponse(BaseModel):
+    delaySeconds: int
+    # Set when the event was published immediately (delaySeconds == 0).
+    event: Optional[NotificationEvent] = None
+
+
+def _notifications_response(since: int, limit: int) -> NotificationsResponse:
+    status = notify_relay.status()
+    events = notify_relay.events_since(since, limit)
+    oldest = status["oldestSeq"]
+    return NotificationsResponse(
+        bootId=status["bootId"],
+        lastSeq=status["lastSeq"],
+        oldestSeq=oldest,
+        hubConnected=status["hubConnected"],
+        truncated=since + 1 < oldest and since < status["lastSeq"],
+        events=[NotificationEvent(**event.to_dict()) for event in events],
+    )
+
+
+@app.get("/notifications", response_model=NotificationsResponse, dependencies=[Depends(verify_token)])
+async def get_notifications(since: int = 0, limit: int = 200):
+    """Buffered PINS and host notifications after sequence number `since`.
+
+    Clients remember `bootId` and the last `seq` they saw. When `bootId` changes the
+    daemon restarted and the client should ask again with `since=0`.
+    """
+    return _notifications_response(max(0, since), max(1, min(limit, 500)))
+
+
+@app.get("/notifications/settings", response_model=NotificationSettings, dependencies=[Depends(verify_token)])
+async def get_notification_settings():
+    return NotificationSettings(**public_config(notify_relay.config))
+
+
+@app.put("/notifications/settings", response_model=NotificationSettings, dependencies=[Depends(verify_token)])
+async def update_notification_settings(update: NotificationSettingsUpdate):
+    payload = update.model_dump(exclude_none=True)
+    if "ntfy" in payload:
+        url = payload["ntfy"].get("url")
+        if url:
+            parsed = urllib.parse.urlparse(url.strip())
+            if parsed.scheme not in ("http", "https") or not parsed.netloc or len(parsed.path) <= 1:
+                raise HTTPException(status_code=422, detail="ntfy url must be http(s)://host/topic")
+    if "diskPath" in payload and not payload["diskPath"].startswith("/"):
+        raise HTTPException(status_code=422, detail="diskPath must be an absolute path")
+    try:
+        config = notify_relay.update_config(payload)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to save notification settings: {exc}") from exc
+    return NotificationSettings(**public_config(config))
+
+
+_notify_test_tasks: set = set()
+
+
+@app.post("/notifications/test", response_model=NotificationTestResponse, dependencies=[Depends(verify_token)])
+async def send_test_notification(request: NotificationTestRequest):
+    """Publish a test event to every listener and, if configured, ntfy."""
+    if not notify_relay.config.get("enabled", True):
+        raise HTTPException(status_code=409, detail="Notifications are disabled")
+
+    def publish():
+        return notify_relay.publish(
+            request.severity, "system", request.message, title="Test", code="system.test"
+        )
+
+    if request.delaySeconds == 0:
+        event = publish()
+        return NotificationTestResponse(delaySeconds=0, event=NotificationEvent(**event.to_dict()))
+
+    async def publish_later():
+        await asyncio.sleep(request.delaySeconds)
+        publish()
+
+    task = asyncio.create_task(publish_later())
+    _notify_test_tasks.add(task)
+    task.add_done_callback(_notify_test_tasks.discard)
+    return NotificationTestResponse(delaySeconds=request.delaySeconds)
+
+
+@app.websocket("/notifications/stream")
+async def websocket_notifications(websocket: WebSocket):
+    """Live notification stream for the Touch-N-Stars background listener.
+
+    Query: `token` (API token), `since` (last seq the client saw), `bootId` (the
+    bootId that seq belongs to; a mismatch replays the whole buffer).
+    Messages (JSON text): `{"kind": "hello", ...status}`, then
+    `{"kind": "event", "event": {...}}` for buffered and live events, and
+    `{"kind": "ping"}` every 25 s so clients can detect dead connections.
+    """
+    token = websocket.query_params.get("token")
+    if token != os.getenv("API_TOKEN", "change-me-please"):
+        await websocket.close(code=1008)
+        return
+
+    try:
+        since = max(0, int(websocket.query_params.get("since", "0")))
+    except ValueError:
+        since = 0
+    client_boot_id = websocket.query_params.get("bootId")
+    if client_boot_id and client_boot_id != notify_relay.boot_id:
+        since = 0
+
+    await websocket.accept()
+    # Register before replaying so nothing published during the replay is missed;
+    # `sent` drops the duplicates that then arrive through the queue.
+    queue = notify_relay.register_listener()
+    sent = since
+    try:
+        await websocket.send_json({"kind": "hello", **notify_relay.status()})
+        for event in notify_relay.events_since(since):
+            await websocket.send_json({"kind": "event", "event": event.to_dict()})
+            sent = event.seq
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=NOTIFY_STREAM_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                await websocket.send_json({"kind": "ping"})
+                continue
+            if event.seq <= sent:
+                continue
+            await websocket.send_json({"kind": "event", "event": event.to_dict()})
+            sent = event.seq
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        notify_relay.remove_listener(queue)
+        try:
+            await websocket.close()
+        except Exception:
             pass
 
 
