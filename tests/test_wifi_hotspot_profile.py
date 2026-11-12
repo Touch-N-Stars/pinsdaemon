@@ -52,7 +52,8 @@ nmcli() {
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for key, value in (("802-11-wireless.band", "bg"), ("802-11-wireless.channel", "6"),
                            ("wifi-sec.proto", "rsn"), ("wifi-sec.pairwise", "ccmp"),
-                           ("wifi-sec.group", "ccmp"), ("wifi-sec.psk", "test-password")):
+                           ("wifi-sec.group", "ccmp"), ("wifi-sec.pmf", "disable"),
+                           ("wifi-sec.psk", "test-password")):
             self.assertEqual(args[args.index(key) + 1], value)
 
     def test_explicit_band_and_channel_are_preserved(self):

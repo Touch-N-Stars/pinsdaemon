@@ -49,6 +49,20 @@ class FakeNmcli:
         return wifi.CommandResult(0)
 
 
+class SequencedScanNmcli(FakeNmcli):
+    """Returns the given scan results one after another."""
+
+    def __init__(self, scans):
+        super().__init__({})
+        self.scans = iter(scans)
+
+    def run(self, args, **kwargs):
+        if "--rescan" in args:
+            self.calls.append(args)
+            return next(self.scans)
+        return super().run(args, **kwargs)
+
+
 class SavedNetworkTests(unittest.TestCase):
     def test_metadata_filters_ap_and_sorts_priority_then_recency(self):
         fields = {"802-11-wireless.mode": "infrastructure", "connection.autoconnect": "yes",
@@ -91,6 +105,46 @@ class SavedNetworkTests(unittest.TestCase):
             with self.assertRaises(wifi.WifiFailure):
                 wifi.activate_saved_networks(args, FakeNmcli({}))
         self.assertEqual([c.args[1] for c in credentials.call_args_list], ["visible", "hidden"])
+
+    def scan_attempts(self, scans):
+        """Run auto selection against a sequence of scan results; return activated UUIDs and scan count."""
+        args = SimpleNamespace(client_iface="wlan0", hotspot_iface="wlan0", profile_uuid=None, config_file="unused")
+        nm = SequencedScanNmcli(scans)
+        with patch.object(wifi, "saved_networks", return_value=[network("home")]), patch.object(
+            wifi, "_profile_has_usable_credentials", return_value=True
+        ), patch.object(wifi, "_activate") as activate, patch.object(wifi, "_verify_connection_commit"), patch.object(
+            wifi, "_persist_success"
+        ), patch.object(wifi.time, "sleep") as sleep:
+            try:
+                wifi.activate_saved_networks(args, nm)
+                error = None
+            except wifi.WifiFailure as exc:
+                error = exc.code
+        scans_run = sum("--rescan" in call for call in nm.calls)
+        return [c.args[1] for c in activate.call_args_list], scans_run, sleep.call_count, error
+
+    def test_empty_scan_after_ap_teardown_is_retried(self):
+        activated, scans, sleeps, error = self.scan_attempts(
+            [wifi.CommandResult(0, ""), wifi.CommandResult(0, "\n"), wifi.CommandResult(0, "Home\n")])
+        self.assertIsNone(error)
+        self.assertEqual(activated, ["home"])
+        self.assertEqual((scans, sleeps), (3, 2))
+
+    def test_persistently_empty_scan_still_falls_back_to_hotspot(self):
+        activated, scans, _, error = self.scan_attempts([wifi.CommandResult(0, "")] * wifi.SCAN_ATTEMPTS)
+        self.assertEqual(error, "NETWORK_NOT_FOUND")
+        self.assertEqual(activated, [])
+        self.assertEqual(scans, wifi.SCAN_ATTEMPTS)
+
+    def test_scan_with_other_networks_is_not_retried(self):
+        activated, scans, sleeps, error = self.scan_attempts([wifi.CommandResult(0, "Neighbour\n")])
+        self.assertEqual(error, "NETWORK_NOT_FOUND")
+        self.assertEqual((activated, scans, sleeps), ([], 1, 0))
+
+    def test_failed_scan_keeps_saved_profiles(self):
+        activated, scans, _, error = self.scan_attempts([wifi.CommandResult(1, "", "busy")])
+        self.assertIsNone(error)
+        self.assertEqual((activated, scans), (["home"], 1))
 
     def test_uuid_connection_preserves_disabled_autoconnect_and_band(self):
         args = SimpleNamespace(client_iface="wlan0", hotspot_iface="wlan0", profile_uuid=UUID, config_file="unused")

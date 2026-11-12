@@ -240,6 +240,8 @@ if [ "$INCLUDE_API_JOURNAL" -eq 1 ]; then
     run_command "$OUTPUT_DIR/logs/journal-networkmanager-current-boot.txt" journalctl -b -u NetworkManager.service -n "$JOURNAL_LINES" --no-pager
     run_command "$OUTPUT_DIR/logs/journal-networkmanager-current-boot-monotonic.txt" journalctl -b -u NetworkManager.service -o short-monotonic -n "$JOURNAL_LINES" --no-pager
     run_command "$OUTPUT_DIR/logs/journal-networkmanager-previous-boot.txt" journalctl -b -1 -u NetworkManager.service -n "$JOURNAL_LINES" --no-pager
+    # AP-mode station joins and handshake failures are only logged here.
+    run_command "$OUTPUT_DIR/logs/journal-wpa-supplicant.txt" journalctl -u wpa_supplicant.service -n "$JOURNAL_LINES" --no-pager
     run_command "$OUTPUT_DIR/logs/journal-avahi-current-boot.txt" journalctl -b -u avahi-daemon.service -n "$JOURNAL_LINES" --no-pager
     run_command "$OUTPUT_DIR/logs/journal-kernel-current-boot.txt" journalctl -b -k -n "$JOURNAL_LINES" --no-pager
     run_command "$OUTPUT_DIR/logs/journal-kernel-previous-boot.txt" journalctl -b -1 -k -n "$JOURNAL_LINES" --no-pager

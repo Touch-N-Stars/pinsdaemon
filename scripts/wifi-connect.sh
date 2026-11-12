@@ -480,6 +480,11 @@ enable_hotspot() {
 
     echo "Creating hotspot: $HOTSPOT_SSID"
 
+    # PMF stays disabled: with NetworkManager's default (optional) the AP also
+    # advertises WPA-PSK-SHA256, which brcmfmac AP mode cannot complete, and
+    # clients that pick it report a wrong password. Plain WPA2-PSK/CCMP is the
+    # baseline every phone and tablet supports.
+    #
     # Build the complete AP profile before activating it. The nmcli hotspot
     # shortcut activates a temporary shared profile immediately; modifying and
     # reactivating it can race NetworkManager's previous dnsmasq child, leaving
@@ -503,6 +508,7 @@ enable_hotspot() {
         wifi-sec.proto rsn \
         wifi-sec.pairwise ccmp \
         wifi-sec.group ccmp \
+        wifi-sec.pmf disable \
         wifi-sec.psk "$HOTSPOT_PASSWORD" >/dev/null; then
         echo "Failed to create configured hotspot profile."
         return 1
