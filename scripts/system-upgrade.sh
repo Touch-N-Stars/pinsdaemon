@@ -241,9 +241,10 @@ hold_kernel_packages
 # frequent flush for logs
 stdbuf -oL -eL apt-get update
 
-# Upgrade packages
+# Upgrade packages. --with-new-pkgs installs dependencies that a newer package
+# version adds (e.g. avahi-utils for pinsdaemon) instead of keeping it back.
 echo "Running apt upgrade..."
-UPGRADE_OUTPUT=$(stdbuf -oL -eL apt-get upgrade -y --allow-downgrades 2>&1)
+UPGRADE_OUTPUT=$(stdbuf -oL -eL apt-get upgrade -y --with-new-pkgs --allow-downgrades 2>&1)
 echo "$UPGRADE_OUTPUT"
 
 HAS_PACKAGE_UPDATES=true
