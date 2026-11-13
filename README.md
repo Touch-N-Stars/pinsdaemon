@@ -1061,6 +1061,17 @@ When installing a newer `pinsdaemon` `.deb`, package hooks perform the following
 2. Stop `gvfs-gphoto2-volume-monitor.service`.
 3. Start `pins` again after installation finishes.
 
+System upgrades run `apt-get upgrade --with-new-pkgs`, so a package version that adds a
+dependency is upgraded and the dependency installed, instead of being kept back.
+
+### Touch-N-Stars discovery integration
+
+The Linux Touch-N-Stars plugin registers `_touchnstars._tcp` with the system
+Avahi daemon using `avahi-publish-service`. pinsdaemon depends on `avahi-utils`
+to provide this client on PINS images. The `_pinsdaemon._tcp` service file stays
+separate. Installs whose upgrade script predates `--with-new-pkgs` keep the new
+pinsdaemon back until `sudo apt install avahi-utils` (or `sudo apt full-upgrade`) runs once.
+
 ### Manual / Development Setup
 
 1.  **Prerequisites**: Python 3.10+ (`3.12` is used in CI), `venv`.
