@@ -18,6 +18,9 @@ Environment="LOCALIZATION_SCRIPT_PATH=/usr/local/bin/manage-localization.sh"
 # ASTAP database packages install under /opt/astap, but the CLI searches
 # /usr/share/astap/data. Run this as root before dropping to User=.
 ExecStartPre=+/usr/local/bin/ensure-astap-data-links.sh
+# wayvnc 0.10.2-1+rpt2 drops unauthenticated VNC clients; switch PINS'
+# auth-less config to PAM login. Never block the daemon on failure.
+ExecStartPre=-+/usr/local/bin/ensure-wayvnc-auth.sh
 # Run uvicorn using the virtual environment
 ExecStart=/opt/pinsdaemon/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always

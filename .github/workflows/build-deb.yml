@@ -63,6 +63,7 @@ jobs:
         cp scripts/install-indi-package.sh build/usr/local/bin/
         cp scripts/install-astap-star-database.sh build/usr/local/bin/
         cp scripts/ensure-astap-data-links.sh build/usr/local/bin/
+        cp scripts/ensure-wayvnc-auth.sh build/usr/local/bin/
         cp scripts/ensure-required-packages.sh build/usr/local/bin/
         cp scripts/manage-plugin.sh build/usr/local/bin/
         cp scripts/manage-samba.sh build/usr/local/bin/
