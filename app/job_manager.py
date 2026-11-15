@@ -2,7 +2,7 @@ import asyncio
 import uuid
 import time
 import re
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -13,6 +13,12 @@ class JobStatus(str, Enum):
     RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
+    # Only reported for a persisted upgrade whose detached unit is gone without a
+    # recorded result (reboot, power loss, killed unit). Never set on a live job.
+    UNKNOWN = "unknown"
+
+
+TERMINAL_JOB_STATUSES = frozenset({JobStatus.SUCCESS, JobStatus.FAILED, JobStatus.UNKNOWN})
 
 @dataclass
 class Job:
@@ -32,6 +38,8 @@ class Job:
     logs: List[str] = field(default_factory=list)
     # Queues for active websocket listeners
     listeners: List[asyncio.Queue] = field(default_factory=list)
+    # Called once with the job after it reached its final status.
+    on_finished: Optional[Callable[["Job"], None]] = None
 
     async def add_log(self, line: str):
         self.logs.append(line)
@@ -98,10 +106,15 @@ class JobManager:
         job_id: Optional[str] = None,
         display_command: Optional[str] = None,
         stdin_data: Optional[bytes] = None,
+        on_finished: Optional[Callable[[Job], None]] = None,
     ) -> str:
         if not job_id:
             job_id = str(uuid.uuid4())
-        job = Job(id=job_id, command=display_command if display_command is not None else " ".join(command))
+        job = Job(
+            id=job_id,
+            command=display_command if display_command is not None else " ".join(command),
+            on_finished=on_finished,
+        )
         self.jobs[job_id] = job
         append_local_log("jobs", f"job {job_id} started: {job.command}")
         
@@ -228,14 +241,37 @@ class JobManager:
         )
         
         job.status = JobStatus.SUCCESS if is_success else JobStatus.FAILED
-        
+        append_local_log(
+            "jobs",
+            f"job {job.id} finished status={job.status} exit_code={job.exit_code} unit={unit_name}",
+        )
+
         for listener in job.listeners:
             await listener.put(None)
+
+    @staticmethod
+    def _notify_finished(job: Job) -> None:
+        callback = job.on_finished
+        if callback is None or job.status not in TERMINAL_JOB_STATUSES:
+            return
+        job.on_finished = None
+        try:
+            callback(job)
+        except Exception as e:  # A persistence hook must never break the job itself.
+            append_local_log("jobs", f"job {job.id} finish hook failed: {e!r}")
 
     async def _run_process(self, job_id: str, command: List[str], stdin_data: Optional[bytes] = None):
         job = self.jobs.get(job_id)
         if not job:
             return
+        try:
+            await self._run_process_inner(job, job_id, command, stdin_data)
+        finally:
+            self._notify_finished(job)
+
+    async def _run_process_inner(
+        self, job: Job, job_id: str, command: List[str], stdin_data: Optional[bytes]
+    ):
 
         job.status = JobStatus.RUNNING
         detached_unit = None

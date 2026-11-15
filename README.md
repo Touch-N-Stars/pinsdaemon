@@ -154,6 +154,19 @@ Triggers a system package upgrade.
   }
   ```
 - **Response**: `JobResponse` object.
+- **409 Conflict**: an upgrade is already running (this daemon's job, or a detached
+  `pins-sysupgrade-<jobId>` unit that is still active after a daemon restart). The
+  body names the running job so a client can follow it instead of starting another:
+  `{"detail": {"message": "A system upgrade is already running.", "jobId": "<uuid>"}}`
+
+The upgrade detaches into a transient systemd unit and records its own state in
+`UPGRADE_LAST_JOB_FILE` (default `/opt/pinsdaemon/last-upgrade-job.json`), because
+it often restarts pinsdaemon itself. After a restart, `GET /jobs/{jobId}` answers
+from that record. A record still marked `started`/`running` whose unit is no
+longer active is settled from systemd: `failed` with the unit's exit status when
+the unit failed, `success` when it exited 0, otherwise `unknown` with
+`errorCode: "UPGRADE_OUTCOME_UNKNOWN"` (unit gone without a result, e.g. after a
+reboot or power loss). The settled record is persisted.
 
 ### 2. Firmware Upload
 
@@ -951,7 +964,7 @@ Stream live logs from a running job.
 ```json
 {
   "jobId": "uuid-string",
-  "status": "started|running|success|failed",
+  "status": "started|running|success|failed|unknown",
   "exitCode": null,
   "startedAt": 1678900000.0,
   "finishedAt": null,
@@ -965,7 +978,8 @@ Stream live logs from a running job.
 ```
 
 Progress fields are optional and remain `null` for jobs whose scripts do not
-emit structured progress.
+emit structured progress. `unknown` is final and only occurs for a persisted
+upgrade whose outcome could not be established (see System Upgrade).
 
 **FirmwareUploadResponse**
 ```json
