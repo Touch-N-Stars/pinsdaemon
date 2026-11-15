@@ -22,8 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from typing import Optional, List, Dict, Any, Literal
 
 from .auth import verify_token
-from .job_manager import job_manager, JobStatus
-from .local_logging import install_stdio_tee
+from .job_manager import job_manager, JobStatus, TERMINAL_JOB_STATUSES
+from .local_logging import append_local_log, install_stdio_tee
 from .wifi_config import (
     NETWORK_MODE_AUTO,
     NETWORK_MODE_HOTSPOT,
@@ -1833,6 +1833,8 @@ def _job_response_from_state(data: Optional[Dict[str, Any]]) -> Optional[JobResp
         started_at = float(data["startedAt"])
         finished_at_raw = data.get("finishedAt")
         finished_at = float(finished_at_raw) if finished_at_raw is not None else None
+        error_code = data.get("errorCode")
+        error_message = data.get("errorMessage")
         return JobResponse(
             jobId=str(data["jobId"]),
             status=status,
@@ -1840,9 +1842,150 @@ def _job_response_from_state(data: Optional[Dict[str, Any]]) -> Optional[JobResp
             startedAt=started_at,
             finishedAt=finished_at,
             command=str(data.get("command", "")),
+            errorCode=str(error_code) if error_code else None,
+            errorMessage=str(error_message) if error_message else None,
         )
     except Exception:
         return None
+
+
+UPGRADE_UNIT_PREFIX = "pins-sysupgrade-"
+UPGRADE_UNIT_ACTIVE_STATES = frozenset({"active", "activating", "deactivating", "reloading"})
+UPGRADE_JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+UPGRADE_UNIT_QUERY_TIMEOUT_SECONDS = 5.0
+UPGRADE_OUTCOME_UNKNOWN_CODE = "UPGRADE_OUTCOME_UNKNOWN"
+UPGRADE_UNIT_FAILED_CODE = "UPGRADE_UNIT_FAILED"
+
+
+def _is_terminal_status(status: Any) -> bool:
+    try:
+        return JobStatus(status) in TERMINAL_JOB_STATUSES
+    except ValueError:
+        return False
+
+
+async def _read_upgrade_unit_properties(job_id: str) -> Optional[Dict[str, str]]:
+    """Read-only systemd view of the detached upgrade unit, or None if unavailable.
+
+    `systemctl show` needs no privileges. For a unit systemd no longer knows it
+    still succeeds and reports LoadState=not-found, ActiveState=inactive.
+    """
+    if not UPGRADE_JOB_ID_PATTERN.fullmatch(job_id):
+        return None
+    unit = f"{UPGRADE_UNIT_PREFIX}{job_id}.service"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "show", unit,
+            "-p", "LoadState,ActiveState,Result,ExecMainStatus",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=UPGRADE_UNIT_QUERY_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return None
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    properties = {}
+    for line in stdout.decode(errors="replace").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            properties[key.strip()] = value.strip()
+    if "ActiveState" not in properties:
+        return None
+    return properties
+
+
+def _settled_upgrade_state(stored: Dict[str, Any], properties: Dict[str, str]) -> Dict[str, Any]:
+    """Final record for a persisted upgrade whose unit is no longer running."""
+    settled = dict(stored)
+    settled["finishedAt"] = time.time()
+    load_state = properties.get("LoadState", "")
+    active_state = properties.get("ActiveState", "")
+    result = properties.get("Result", "")
+    try:
+        exit_status = int(properties.get("ExecMainStatus", ""))
+    except ValueError:
+        exit_status = None
+
+    if load_state == "loaded" and active_state == "inactive" and result == "success" and exit_status == 0:
+        # systemd saw the script exit 0, which it only does after a complete run.
+        settled.update(status=JobStatus.SUCCESS.value, exitCode=0, errorCode=None, errorMessage=None)
+    elif load_state == "loaded" and active_state == "failed":
+        settled.update(
+            status=JobStatus.FAILED.value,
+            exitCode=exit_status if exit_status else 1,
+            errorCode=UPGRADE_UNIT_FAILED_CODE,
+            errorMessage=f"The upgrade unit failed (result: {result or 'unknown'}).",
+        )
+    else:
+        # The unit is gone (reboot, power loss, garbage-collected after a kill)
+        # and the script never recorded a result: the outcome cannot be known.
+        settled.update(
+            status=JobStatus.UNKNOWN.value,
+            exitCode=None,
+            errorCode=UPGRADE_OUTCOME_UNKNOWN_CODE,
+            errorMessage=(
+                "The upgrade process is no longer running and did not record a result. "
+                "Check for updates to see whether packages are still pending."
+            ),
+        )
+    return settled
+
+
+async def _reconciled_upgrade_state() -> Optional[Dict[str, Any]]:
+    """Persisted upgrade record, settled against systemd if it claims to be running.
+
+    A record left at started/running by a daemon that has since restarted is only
+    trusted while its detached unit is still active. Once the unit has stopped
+    without the script writing a result, the record is settled and persisted so
+    clients stop waiting for an upgrade that no longer exists.
+    """
+    stored = _read_last_upgrade_job_state()
+    if not stored or _is_terminal_status(stored.get("status")):
+        return stored
+    job_id = str(stored.get("jobId", ""))
+    if job_manager.get_job(job_id) is not None:
+        # This daemon still monitors the job; its runtime state is authoritative.
+        return stored
+
+    properties = await _read_upgrade_unit_properties(job_id)
+    if properties is None or properties.get("ActiveState") in UPGRADE_UNIT_ACTIVE_STATES:
+        return stored
+
+    # The script's EXIT trap may have written its result while we queried systemd.
+    fresh = _read_last_upgrade_job_state()
+    if not fresh or str(fresh.get("jobId", "")) != job_id or _is_terminal_status(fresh.get("status")):
+        return fresh
+
+    settled = _settled_upgrade_state(fresh, properties)
+    _write_last_upgrade_job_state(settled)
+    append_local_log(
+        "jobs",
+        f"job {job_id} settled from persisted state: status={settled['status']} "
+        f"unit_load={properties.get('LoadState')} unit_active={properties.get('ActiveState')} "
+        f"unit_result={properties.get('Result')}",
+    )
+    return settled
+
+
+def _persist_finished_upgrade_job(job) -> None:
+    """Finish hook: record the daemon's own final evaluation of an upgrade job.
+
+    The upgrade script writes its own result on exit; that stays authoritative.
+    This only fills in a record the script left unfinished (e.g. a failed state
+    write, or a failure before the script started).
+    """
+    stored = _read_last_upgrade_job_state()
+    if not stored or str(stored.get("jobId", "")) != job.id:
+        return
+    if _is_terminal_status(stored.get("status")):
+        return
+    _write_last_upgrade_job_state(_job_response_from_runtime_job(job).model_dump(mode="json"))
 
 
 def _job_response_from_runtime_job(job) -> JobResponse:
@@ -2044,7 +2187,17 @@ async def change_repository(request: RepositoryChangeRequest):
 async def trigger_upgrade(request: UpgradeRequest):
     """
     Triggers the system upgrade script.
+
+    Returns 409 with the running job's id when an upgrade is already in progress,
+    so a second client attaches to it instead of starting a competing run.
     """
+    active_job_id = await _active_upgrade_job_id()
+    if active_job_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "A system upgrade is already running.", "jobId": active_job_id},
+        )
+
     # Create specific job ID to track the systemd unit
     job_id = str(uuid.uuid4())
     
@@ -2058,14 +2211,51 @@ async def trigger_upgrade(request: UpgradeRequest):
         cmd.append("--dry-run")
 
     # Pass the pre-generated ID so job manager uses it
-    await job_manager.start_job(cmd, job_id=job_id)
+    await job_manager.start_job(cmd, job_id=job_id, on_finished=_persist_finished_upgrade_job)
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=500, detail="Failed to create upgrade job")
 
     response = _job_response_from_runtime_job(job)
-    _write_last_upgrade_job_state(response.model_dump())
+    _write_last_upgrade_job_state(response.model_dump(mode="json"))
     return response
+
+
+async def _active_upgrade_job_id() -> Optional[str]:
+    for job in job_manager.jobs.values():
+        if job.command.startswith(f"sudo -n {SCRIPT_PATH} ") and job.status not in TERMINAL_JOB_STATUSES:
+            return job.id
+    # A persisted record only blocks a new run while systemd confirms its unit is
+    # active, so a stale record can never lock upgrades out.
+    stored = await _reconciled_upgrade_state()
+    if not stored or _is_terminal_status(stored.get("status")):
+        return None
+    job_id = str(stored.get("jobId", ""))
+    properties = await _read_upgrade_unit_properties(job_id)
+    if properties and properties.get("ActiveState") in UPGRADE_UNIT_ACTIVE_STATES:
+        return job_id
+    return None
+
+
+def _upgrade_job_response(job_id: str, stored_response: Optional[JobResponse]) -> Optional[JobResponse]:
+    """Best known state of one job, preferring the upgrade script's own final record.
+
+    The script persists its exit status itself, so a terminal record for this job
+    wins over a runtime job that still looks unfinished (for example when the
+    daemon's unit monitor could not read systemd).
+    """
+    job = job_manager.get_job(job_id)
+    stored_matches = stored_response is not None and stored_response.jobId == job_id
+    if job is None:
+        return stored_response if stored_matches else None
+    runtime_response = _job_response_from_runtime_job(job)
+    if (
+        stored_matches
+        and stored_response.status in TERMINAL_JOB_STATUSES
+        and runtime_response.status not in TERMINAL_JOB_STATUSES
+    ):
+        return stored_response
+    return runtime_response
 
 
 @app.get("/updates/check", response_model=UpdatesCheckResponse, dependencies=[Depends(verify_token)])
@@ -2529,9 +2719,8 @@ async def manage_phd2(request: Phd2Request):
 @app.get("/jobs/latest", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def get_latest_job_status():
     runtime_job = job_manager.get_latest_job()
-    runtime_response = _job_response_from_runtime_job(runtime_job) if runtime_job else None
-
-    stored_response = _job_response_from_state(_read_last_upgrade_job_state())
+    stored_response = _job_response_from_state(await _reconciled_upgrade_state())
+    runtime_response = _upgrade_job_response(runtime_job.id, stored_response) if runtime_job else None
 
     if runtime_response and stored_response:
         if stored_response.startedAt >= runtime_response.startedAt:
@@ -2548,14 +2737,15 @@ async def get_latest_job_status():
 
 @app.get("/jobs/{job_id}", response_model=JobResponse, dependencies=[Depends(verify_token)])
 async def get_job_status(job_id: str):
-    job = job_manager.get_job(job_id)
-    if not job:
-        stored_response = _job_response_from_state(_read_last_upgrade_job_state())
-        if stored_response and stored_response.jobId == job_id:
-            return stored_response
-        raise HTTPException(status_code=404, detail="Job not found")
+    stored_response = None
+    stored = _read_last_upgrade_job_state()
+    if stored and str(stored.get("jobId", "")) == job_id:
+        stored_response = _job_response_from_state(await _reconciled_upgrade_state())
 
-    return _job_response_from_runtime_job(job)
+    response = _upgrade_job_response(job_id, stored_response)
+    if response is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return response
 
 @app.websocket("/logs/{job_id}")
 async def websocket_logs(websocket: WebSocket, job_id: str):

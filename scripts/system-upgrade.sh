@@ -88,9 +88,15 @@ payload = {
     "command": command,
 }
 
-with open(state_file, "w", encoding="utf-8") as f:
+# Write atomically: pinsdaemon may read the file at any moment, and a torn read
+# makes the job look unknown (404) to clients.
+temp_file = f"{state_file}.{os.getpid()}.tmp"
+with open(temp_file, "w", encoding="utf-8") as f:
     json.dump(payload, f, indent=2)
     f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(temp_file, state_file)
 PY
     then
         return 0
