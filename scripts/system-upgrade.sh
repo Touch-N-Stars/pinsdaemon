@@ -265,6 +265,14 @@ echo "Cleaning APT cache..."
 stdbuf -oL -eL apt-get clean
 stdbuf -oL -eL apt-get autoclean
 
+# A wayvnc upgrade can replace the control service with one that drops
+# unauthenticated clients; adapt the VNC config in the same run.
+WAYVNC_AUTH_SCRIPT="/usr/local/bin/ensure-wayvnc-auth.sh"
+if [[ -x "$WAYVNC_AUTH_SCRIPT" ]]; then
+    echo "Checking WayVNC authentication..."
+    "$WAYVNC_AUTH_SCRIPT" || echo "WayVNC authentication check failed; continuing."
+fi
+
 echo "Validating pinned kernel version..."
 enforce_target_kernel_version
 

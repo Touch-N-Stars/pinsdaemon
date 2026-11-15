@@ -42,6 +42,11 @@ if [ -f "/usr/local/bin/ensure-astap-data-links.sh" ]; then
     chmod 755 /usr/local/bin/ensure-astap-data-links.sh
 fi
 
+if [ -f "/usr/local/bin/ensure-wayvnc-auth.sh" ]; then
+    chown root:root /usr/local/bin/ensure-wayvnc-auth.sh
+    chmod 755 /usr/local/bin/ensure-wayvnc-auth.sh
+fi
+
 if [ -f "/usr/local/bin/ensure-required-packages.sh" ]; then
     chown root:root /usr/local/bin/ensure-required-packages.sh
     chmod 755 /usr/local/bin/ensure-required-packages.sh
