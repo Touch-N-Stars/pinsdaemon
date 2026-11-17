@@ -21,6 +21,11 @@ JOB_ID=""
 STATE_FILE=""
 HANDOFF_TO_DETACHED=false
 STARTED_AT="$(date +%s)"
+# Raw APT state of the last run, kept for diagnostics until the next upgrade.
+UPGRADE_WORK_DIR="${PINS_UPGRADE_WORK_DIR:-/var/log/pins-upgrade}"
+REPORT_FILE=""
+REPORT_HELPER="$(dirname "$0")/pins-upgrade-report.py"
+PINS_REPOSITORY_LOCK="${PINS_REPOSITORY_LOCK:-/run/lock/pins-repository.lock}"
 
 write_job_state() {
     local status="$1"
@@ -35,7 +40,7 @@ write_job_state() {
         return 0
     fi
 
-    if ! python3 - "$STATE_FILE" "$JOB_ID" "$status" "$exit_code" "$STARTED_AT" "$finished_at" "$0" "$DRY_RUN" <<'PY'
+    if ! python3 - "$STATE_FILE" "$JOB_ID" "$status" "$exit_code" "$STARTED_AT" "$finished_at" "$0" "$DRY_RUN" "$REPORT_FILE" <<'PY'
 import json
 import os
 import sys
@@ -48,6 +53,7 @@ started_at_raw = sys.argv[5]
 finished_at_raw = sys.argv[6]
 script_path = sys.argv[7]
 dry_run_raw = sys.argv[8]
+report_file = sys.argv[9]
 
 existing = {}
 try:
@@ -87,6 +93,20 @@ payload = {
     "finishedAt": finished_at,
     "command": command,
 }
+
+# The structured outcome (see pins-upgrade-report.py) is only attached to the
+# final record, so clients never see a stale report on a running job.
+if status in ("success", "failed") and report_file:
+    try:
+        with open(report_file, "r", encoding="utf-8") as f:
+            report = json.load(f)
+    except Exception:
+        report = None
+    if isinstance(report, dict):
+        payload["upgradeReport"] = report
+        if status == "failed" and report.get("errorCode"):
+            payload["errorCode"] = report.get("errorCode")
+            payload["errorMessage"] = report.get("message")
 
 # Write atomically: pinsdaemon may read the file at any moment, and a torn read
 # makes the job look unknown (404) to clients.
@@ -235,35 +255,129 @@ if [[ "${PINS_UPDATE_DETACHED}" != "true" ]]; then
     fi
 fi
 
-# Update package lists
-exec 9>/run/lock/pins-repository.lock
+
+exec 9>"$PINS_REPOSITORY_LOCK"
 flock -n 9 || { echo "Another PINS package operation is running" >&2; exit 1; }
-echo "Running apt update..."
 export DEBIAN_FRONTEND=noninteractive
+# APT output is parsed below; keep it in a fixed language.
+export LC_ALL=C LANG=C
+
+# Never full-upgrade/dist-upgrade: `upgrade` cannot remove packages, and
+# --with-new-pkgs only lets it install dependencies that newer versions add
+# (e.g. avahi-utils for pinsdaemon) instead of keeping those packages back.
+APT_UPGRADE_FLAGS=(--with-new-pkgs --allow-downgrades)
+APT_LOCK_OPTION=(-o DPkg::Lock::Timeout=300)
+
+rm -rf "$UPGRADE_WORK_DIR"
+mkdir -p "$UPGRADE_WORK_DIR"
+chmod 755 "$UPGRADE_WORK_DIR"
+REPORT_FILE="$UPGRADE_WORK_DIR/report.json"
+
+run_helper() {
+    python3 "$REPORT_HELPER" "$@"
+}
+
+# Simulates an apt-get command into <name>.txt/<name>.rc; never fails the script.
+simulate() {
+    local name="$1"
+    shift
+    local rc=0
+    apt-get -s "$@" >"$UPGRADE_WORK_DIR/$name.txt" 2>&1 || rc=$?
+    echo "$rc" >"$UPGRADE_WORK_DIR/$name.rc"
+    return 0
+}
+
+collect_package_state() {
+    local pins_packages=()
+    apt-mark showhold >"$UPGRADE_WORK_DIR/held.txt" 2>/dev/null || true
+    dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Abbrev}\n' \
+        >"$UPGRADE_WORK_DIR/installed.txt" 2>/dev/null || true
+    mapfile -t pins_packages < <(run_helper pins-installed "$UPGRADE_WORK_DIR/installed.txt")
+    if [[ "${#pins_packages[@]}" -gt 0 ]]; then
+        apt-cache policy "${pins_packages[@]}" >"$UPGRADE_WORK_DIR/policy.txt" 2>&1 || true
+    else
+        : >"$UPGRADE_WORK_DIR/policy.txt"
+    fi
+}
 
 echo "Holding kernel-related packages to avoid unintended kernel upgrades..."
 hold_kernel_packages
 
-# frequent flush for logs
-stdbuf -oL -eL apt-get update
+# A previous run that was interrupted (power loss, killed unit) leaves dpkg with
+# half-configured packages; finishing their configuration is the safe recovery.
+if [[ -n "$(dpkg --audit 2>/dev/null)" ]]; then
+    echo "Interrupted package installation detected; completing it with dpkg --configure -a..."
+    stdbuf -oL -eL dpkg --configure -a || echo "dpkg --configure -a failed; the upgrade report will include the remaining problem."
+fi
 
-# Upgrade packages. --with-new-pkgs installs dependencies that a newer package
-# version adds (e.g. avahi-utils for pinsdaemon) instead of keeping it back.
+echo "Running apt update..."
+stdbuf -oL -eL apt-get "${APT_LOCK_OPTION[@]}" update
+
+echo "Planning upgrade..."
+simulate plan upgrade "${APT_UPGRADE_FLAGS[@]}"
+PLAN_RC=0
+run_helper check-plan "$UPGRADE_WORK_DIR/plan.txt" --rc "$(cat "$UPGRADE_WORK_DIR/plan.rc")" \
+    --report "$REPORT_FILE" --protected "${KERNEL_PACKAGE_CANDIDATES[@]}" || PLAN_RC=$?
+if [[ "$PLAN_RC" -ne 0 ]]; then
+    cat "$UPGRADE_WORK_DIR/plan.txt"
+    echo "PINS_UPGRADE_RESULT outcome=blocked code=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["errorCode"])' "$REPORT_FILE" 2>/dev/null || echo UNKNOWN)"
+    echo "Upgrade stopped before changing any package."
+    exit "$PLAN_RC"
+fi
+
 echo "Running apt upgrade..."
-UPGRADE_OUTPUT=$(stdbuf -oL -eL apt-get upgrade -y --with-new-pkgs --allow-downgrades 2>&1)
-echo "$UPGRADE_OUTPUT"
+set +e
+stdbuf -oL -eL apt-get "${APT_LOCK_OPTION[@]}" upgrade -y "${APT_UPGRADE_FLAGS[@]}" --no-remove 2>&1 \
+    | tee "$UPGRADE_WORK_DIR/upgrade.log"
+UPGRADE_RC="${PIPESTATUS[0]}"
+set -e
+echo "$UPGRADE_RC" >"$UPGRADE_WORK_DIR/upgrade.rc"
 
-HAS_PACKAGE_UPDATES=true
+TARGETED_INSTALLED=false
+if [[ "$UPGRADE_RC" -eq 0 ]]; then
+    # The PINS packages must not be left behind silently. If the upgrade kept one
+    # back, try exactly those packages once, only if APT can do it without
+    # removals or kernel changes.
+    collect_package_state
+    mapfile -t PENDING_PINS < <(run_helper pins-pending "$UPGRADE_WORK_DIR/policy.txt")
+    if [[ "${#PENDING_PINS[@]}" -gt 0 ]]; then
+        echo "PINS packages still pending after the upgrade: ${PENDING_PINS[*]}"
+        simulate targeted-plan install --only-upgrade --no-remove --allow-downgrades "${PENDING_PINS[@]}"
+        TARGETED_CHECK_RC=0
+        run_helper check-plan "$UPGRADE_WORK_DIR/targeted-plan.txt" \
+            --rc "$(cat "$UPGRADE_WORK_DIR/targeted-plan.rc")" \
+            --protected "${KERNEL_PACKAGE_CANDIDATES[@]}" \
+            >"$UPGRADE_WORK_DIR/targeted-check.txt" || TARGETED_CHECK_RC=$?
+        if [[ "$TARGETED_CHECK_RC" -eq 0 ]]; then
+            echo "Installing pending PINS packages explicitly..."
+            set +e
+            stdbuf -oL -eL apt-get "${APT_LOCK_OPTION[@]}" install -y --only-upgrade --no-remove \
+                --allow-downgrades "${PENDING_PINS[@]}" 2>&1 | tee "$UPGRADE_WORK_DIR/targeted.log"
+            TARGETED_RC="${PIPESTATUS[0]}"
+            set -e
+            echo "$TARGETED_RC" >"$UPGRADE_WORK_DIR/targeted.rc"
+            [[ "$TARGETED_RC" -eq 0 ]] && TARGETED_INSTALLED=true
+        else
+            echo "Pending PINS packages cannot be installed safely: $(cat "$UPGRADE_WORK_DIR/targeted-check.txt")"
+            cat "$UPGRADE_WORK_DIR/targeted-plan.txt"
+        fi
+    fi
+fi
 
-# Provide a clear signal for clients when no upgrades are available.
-if echo "$UPGRADE_OUTPUT" | grep -qE '^0 upgraded, 0 newly installed, 0 to remove'; then
-    HAS_PACKAGE_UPDATES=false
-    echo "System is already up to date."
+echo "Verifying upgrade result..."
+dpkg --audit >"$UPGRADE_WORK_DIR/dpkg-audit.txt" 2>&1 || true
+collect_package_state
+simulate verify upgrade "${APT_UPGRADE_FLAGS[@]}"
+RESULT_RC=0
+run_helper evaluate "$UPGRADE_WORK_DIR" --protected "${KERNEL_PACKAGE_CANDIDATES[@]}" || RESULT_RC=$?
+
+if [[ "$UPGRADE_RC" -ne 0 ]]; then
+    exit "$RESULT_RC"
 fi
 
 echo "Cleaning APT cache..."
-stdbuf -oL -eL apt-get clean
-stdbuf -oL -eL apt-get autoclean
+stdbuf -oL -eL apt-get clean || true
+stdbuf -oL -eL apt-get autoclean || true
 
 # A wayvnc upgrade can replace the control service with one that drops
 # unauthenticated clients; adapt the VNC config in the same run.
@@ -276,11 +390,20 @@ fi
 echo "Validating pinned kernel version..."
 enforce_target_kernel_version
 
-if [[ "$HAS_PACKAGE_UPDATES" == "true" ]]; then
-    echo "Updates detected. Restarting pins service..."
-    systemctl restart pins
+if grep -q '^Inst ' "$UPGRADE_WORK_DIR/plan.txt" || [[ "$TARGETED_INSTALLED" == "true" ]]; then
+    echo "Updates installed. Restarting pins service..."
+    systemctl restart pins || echo "Restarting pins failed; continuing."
 else
-    echo "No package updates detected. Skipping pins restart."
+    echo "No package updates installed. Skipping pins restart."
 fi
 
-echo "System upgrade completed successfully."
+if [[ "$RESULT_RC" -ne 0 ]]; then
+    echo "System upgrade did not complete; see the report above."
+    exit "$RESULT_RC"
+fi
+# Only a complete run claims completion; a run with kept-back packages says so.
+if grep -q '"outcome": "partial"' "$REPORT_FILE"; then
+    echo "System upgrade finished with packages kept back."
+else
+    echo "System upgrade completed successfully."
+fi

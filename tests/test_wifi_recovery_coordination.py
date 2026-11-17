@@ -175,7 +175,10 @@ class WifiRecoveryCoordinationTests(unittest.TestCase):
             control,
             re.compile(r"^Depends:.*\bavahi-daemon\b", re.MULTILINE),
         )
-        self.assertRegex(control, re.compile(r"^Depends:.*\bavahi-utils\b", re.MULTILINE))
+        # avahi-utils is installed at runtime by ensure-required-packages.sh, not
+        # through Depends: legacy updaters keep back a pinsdaemon that adds one.
+        self.assertNotRegex(control, re.compile(r"^(Depends|Recommends):.*\bavahi-utils\b", re.MULTILINE))
+        self.assertIn('"avahi-utils"', self.read(REPO_ROOT / "scripts" / "ensure-required-packages.sh"))
         self.assertIn("<type>_pinsdaemon._tcp</type>", avahi_service)
         self.assertIn("<port>8000</port>", avahi_service)
         self.assertIn("<name replace-wildcards=\"yes\">%h</name>", avahi_service)
