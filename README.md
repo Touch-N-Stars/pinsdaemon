@@ -168,6 +168,10 @@ the unit failed, `success` when it exited 0, otherwise `unknown` with
 `errorCode: "UPGRADE_OUTCOME_UNKNOWN"` (unit gone without a result, e.g. after a
 reboot or power loss). The settled record is persisted.
 
+The final record also carries the script's `upgradeReport` and, for a failed
+outcome, its `errorCode`/`errorMessage` (see "Upgrade outcome reporting"). That
+record wins over the daemon's own evaluation of the unit.
+
 ### 2. Firmware Upload
 
 Upload a firmware archive and trigger background installation if it is newer than installed firmware.
@@ -1075,16 +1079,76 @@ When installing a newer `pinsdaemon` `.deb`, package hooks perform the following
 2. Stop `gvfs-gphoto2-volume-monitor.service`.
 3. Start `pins` again after installation finishes.
 
-System upgrades run `apt-get upgrade --with-new-pkgs`, so a package version that adds a
-dependency is upgraded and the dependency installed, instead of being kept back.
+System upgrades run `apt-get upgrade --with-new-pkgs --allow-downgrades --no-remove`,
+so a package version that adds a dependency is upgraded and the dependency installed,
+instead of being kept back. The upgrade never runs `full-upgrade`/`dist-upgrade`,
+never removes packages and never changes held packages.
+
+### Upgrade outcome reporting
+
+`system-upgrade.sh` first simulates the upgrade (`apt-get -s`), then runs it, then
+verifies the result: it re-simulates the upgrade and compares each installed PINS
+package (`pins`, `pinsdaemon`, `pins-*`) with its APT candidate. If a PINS package
+is still pending, it tries exactly that package once with
+`apt-get install --only-upgrade --no-remove`, but only if the simulation shows no
+removals and no kernel changes. The raw APT state and `report.json` of the last run
+are kept in `/var/log/pins-upgrade` (included in diagnostics archives). The
+report is attached to the final job record as `upgradeReport`.
+
+| Outcome | Job status | Exit | `errorCode` |
+| --- | --- | --- | --- |
+| `up_to_date`: nothing to install | success | 0 | — |
+| `upgraded`: everything planned installed; only approved kernel holds left | success | 0 | — |
+| `partial`: upgraded, but non-PINS packages kept back (listed) | success | 0 | — |
+| `incomplete`: a PINS package is still pending (reason in `diagnostics`) | failed | 20 | `UPGRADE_PINS_PACKAGE_PENDING` |
+| `blocked`: APT cannot resolve the upgrade; nothing changed | failed | 21 | `UPGRADE_DEPENDENCY_PROBLEM` |
+| `blocked`: the upgrade would remove packages; nothing changed | failed | 22 | `UPGRADE_REMOVAL_REQUIRED` |
+| `failed`: the APT transaction failed (log kept) | failed | 23 | `UPGRADE_APT_FAILED` |
+| `interrupted`: dpkg state could not be repaired | failed | 24 | `UPGRADE_DPKG_INTERRUPTED` |
+| `blocked`: the upgrade would change a pinned kernel package | failed | 25 | `UPGRADE_PROTECTED_PACKAGE_CHANGE` |
+
+"System is already up to date." is printed only for `up_to_date`, and
+"System upgrade completed successfully." only for `up_to_date` and `upgraded`.
+A known non-zero exit status always makes the job fail, whatever the log says.
+An interrupted earlier installation (`dpkg --audit` not empty) is completed
+with `dpkg --configure -a` before the upgrade. Nothing is retried automatically.
+
+### Dependency policy (legacy updaters)
+
+Rigs whose installed `system-upgrade.sh` predates `--with-new-pkgs` (every
+pinsdaemon release before the avahi-utils change) run a plain `apt-get upgrade`.
+That keeps back any package version that adds a **Depends or Recommends**
+(verified against real APT in `tests/test_system_upgrade_apt.py`), and the fixed
+updater ships inside that held-back package. So pinsdaemon must not gain new
+`Depends`/`Recommends`; `tests/test_upgrade_report.py` enforces this. Packages
+the daemon needs at runtime are installed by `ensure-required-packages.sh` on
+every daemon start instead. That script waits for a running upgrade and the PINS
+package lock, then installs missing packages one at a time with `--no-remove`.
 
 ### Touch-N-Stars discovery integration
 
 The Linux Touch-N-Stars plugin registers `_touchnstars._tcp` with the system
-Avahi daemon using `avahi-publish-service`. pinsdaemon depends on `avahi-utils`
-to provide this client on PINS images. The `_pinsdaemon._tcp` service file stays
-separate. Installs whose upgrade script predates `--with-new-pkgs` keep the new
-pinsdaemon back until `sudo apt install avahi-utils` (or `sudo apt full-upgrade`) runs once.
+Avahi daemon using `avahi-publish-service`. pinsdaemon installs `avahi-utils`,
+which provides this client, at daemon start (`ensure-required-packages.sh`); the
+package only lists it under `Suggests` (see the dependency policy above). The
+`_pinsdaemon._tcp` service file stays separate.
+
+### Recovering a rig whose pinsdaemon is kept back
+
+Symptom: the upgrade log lists `pinsdaemon` under "The following packages have
+been kept back" and ends with "System is already up to date.", while
+`/updates/check` still reports a newer pinsdaemon. The installed updater is a
+legacy one (no `--with-new-pkgs`), and the available pinsdaemon added
+`avahi-utils` to `Depends` (builds from 197c493 up to the transitional release).
+
+- **Automatic:** once a pinsdaemon built from this repository state (no new
+  Depends/Recommends) is published to the rig's channel, a normal upgrade from
+  Touch-N-Stars installs it with the legacy updater. The daemon then installs
+  `avahi-utils` on its next start, after the upgrade has released its locks.
+  Every later upgrade runs the new updater.
+- **Immediately (one-time, via SSH):** `sudo apt-get update && sudo apt-get install --only-upgrade pinsdaemon`
+  installs pinsdaemon together with `avahi-utils`. Do not use `full-upgrade`: it
+  is not needed and may remove packages.
 
 ### Manual / Development Setup
 

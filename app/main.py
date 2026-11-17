@@ -1287,6 +1287,9 @@ class JobResponse(BaseModel):
     command: str
     errorCode: Optional[str] = None
     errorMessage: Optional[str] = None
+    # Upgrade jobs only: structured outcome written by system-upgrade.sh
+    # (outcome, pending PINS packages, kept-back and held packages, diagnostics).
+    upgradeReport: Optional[Dict[str, Any]] = None
     progressPhase: Optional[str] = None
     progressPercent: Optional[int] = None
     progressBytes: Optional[int] = None
@@ -1835,6 +1838,7 @@ def _job_response_from_state(data: Optional[Dict[str, Any]]) -> Optional[JobResp
         finished_at = float(finished_at_raw) if finished_at_raw is not None else None
         error_code = data.get("errorCode")
         error_message = data.get("errorMessage")
+        upgrade_report = data.get("upgradeReport")
         return JobResponse(
             jobId=str(data["jobId"]),
             status=status,
@@ -1844,6 +1848,7 @@ def _job_response_from_state(data: Optional[Dict[str, Any]]) -> Optional[JobResp
             command=str(data.get("command", "")),
             errorCode=str(error_code) if error_code else None,
             errorMessage=str(error_message) if error_message else None,
+            upgradeReport=upgrade_report if isinstance(upgrade_report, dict) else None,
         )
     except Exception:
         return None
@@ -2240,20 +2245,17 @@ async def _active_upgrade_job_id() -> Optional[str]:
 def _upgrade_job_response(job_id: str, stored_response: Optional[JobResponse]) -> Optional[JobResponse]:
     """Best known state of one job, preferring the upgrade script's own final record.
 
-    The script persists its exit status itself, so a terminal record for this job
-    wins over a runtime job that still looks unfinished (for example when the
-    daemon's unit monitor could not read systemd).
+    The script persists its exit status and structured outcome itself, so a
+    terminal record for this job wins over the runtime job, whether that still
+    looks unfinished (the unit monitor could not read systemd) or finished
+    without the script's error code, message and report.
     """
     job = job_manager.get_job(job_id)
     stored_matches = stored_response is not None and stored_response.jobId == job_id
     if job is None:
         return stored_response if stored_matches else None
     runtime_response = _job_response_from_runtime_job(job)
-    if (
-        stored_matches
-        and stored_response.status in TERMINAL_JOB_STATUSES
-        and runtime_response.status not in TERMINAL_JOB_STATUSES
-    ):
+    if stored_matches and stored_response.status in TERMINAL_JOB_STATUSES:
         return stored_response
     return runtime_response
 
