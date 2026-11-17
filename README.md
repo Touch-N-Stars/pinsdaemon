@@ -1121,8 +1121,10 @@ That keeps back any package version that adds a **Depends or Recommends**
 (verified against real APT in `tests/test_system_upgrade_apt.py`), and the fixed
 updater ships inside that held-back package. So pinsdaemon must not gain new
 `Depends`/`Recommends`; `tests/test_upgrade_report.py` enforces this. Packages
-the daemon needs at runtime are installed by `ensure-required-packages.sh` on
-every daemon start instead. That script waits for a running upgrade and the PINS
+the daemon needs at runtime are installed by `ensure-required-packages.sh`
+instead: right after installation (postinst starts
+`pins-ensure-required-packages.service` without blocking) and again on every
+daemon start. That script waits for a running upgrade and the PINS
 package lock, then installs missing packages one at a time with `--no-remove`.
 
 ### Touch-N-Stars discovery integration
@@ -1143,9 +1145,14 @@ legacy one (no `--with-new-pkgs`), and the available pinsdaemon added
 
 - **Automatic:** once a pinsdaemon built from this repository state (no new
   Depends/Recommends) is published to the rig's channel, a normal upgrade from
-  Touch-N-Stars installs it with the legacy updater. The daemon then installs
-  `avahi-utils` on its next start, after the upgrade has released its locks.
-  Every later upgrade runs the new updater.
+  Touch-N-Stars installs it with the legacy updater. Its postinst immediately
+  starts `pins-ensure-required-packages.service` (`--no-block`, its own unit, so
+  a daemon restart cannot interrupt it). That job waits until the running
+  upgrade has ended and released the APT/PINS locks, then installs
+  `avahi-utils`, normally within a minute of the upgrade finishing. Each rig
+  recovers on its own first upgrade; nothing waits for the rest of the fleet.
+  The daemon also runs the same check on every start, which retries if the
+  rig was offline. Every later upgrade runs the new updater.
 - **Immediately (one-time, via SSH):** `sudo apt-get update && sudo apt-get install --only-upgrade pinsdaemon`
   installs pinsdaemon together with `avahi-utils`. Do not use `full-upgrade`: it
   is not needed and may remove packages.

@@ -1,0 +1,13 @@
+[Unit]
+Description=Install packages pinsdaemon needs at runtime (e.g. avahi-utils)
+# Started by the pinsdaemon postinst (--no-block) right after installation. Runs
+# as its own unit so a pinsdaemon restart cannot interrupt an APT transaction.
+# The script waits for a running PINS upgrade and the package locks itself.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ensure-required-packages.sh
+# Waiting for a long upgrade plus the install itself.
+TimeoutStartSec=2h
