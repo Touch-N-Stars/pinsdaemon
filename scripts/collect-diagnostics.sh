@@ -210,7 +210,7 @@ if [ "$INCLUDE_SYSTEM_INFO" -eq 1 ]; then
     run_command "$OUTPUT_DIR/system/dbus-networkmanager.txt" busctl --system status org.freedesktop.NetworkManager
     run_command "$OUTPUT_DIR/system/raspberry-pi-throttling.txt" vcgencmd get_throttled
     run_command "$OUTPUT_DIR/system/raspberry-pi-temperature.txt" vcgencmd measure_temp
-    run_command "$OUTPUT_DIR/system/package-versions.txt" dpkg-query -W -f '${binary:Package}\t${Version}\t${db:Status-Abbrev}\n' pinsdaemon network-manager dnsmasq-base wpasupplicant iw iproute2 ethtool avahi-daemon
+    run_command "$OUTPUT_DIR/system/package-versions.txt" dpkg-query -W -f '${binary:Package}\t${Version}\t${db:Status-Abbrev}\n' pinsdaemon network-manager dnsmasq-base wpasupplicant iw iproute2 ethtool avahi-daemon avahi-utils
     run_command "$OUTPUT_DIR/system/networkmanager-version.txt" NetworkManager --version
     run_command "$OUTPUT_DIR/system/nmcli-version.txt" nmcli --version
     run_command "$OUTPUT_DIR/system/dnsmasq-version.txt" dnsmasq --version
@@ -223,6 +223,14 @@ if [ "$INCLUDE_SYSTEM_INFO" -eq 1 ]; then
         /usr/local/bin/collect-diagnostics.sh \
         /etc/NetworkManager/dispatcher.d/90-pins-wifi-recovery
     run_command "$OUTPUT_DIR/system/pinsdaemon-package-verification.txt" dpkg -V pinsdaemon
+    # Why an upgrade left PINS packages behind: holds, selected candidates and
+    # the last upgrade's raw APT state and report (system-upgrade.sh).
+    run_command "$OUTPUT_DIR/system/apt-held-packages.txt" apt-mark showhold
+    run_command "$OUTPUT_DIR/system/apt-policy-pins.txt" apt-cache policy pins pinsdaemon avahi-utils
+    if [ -d /var/log/pins-upgrade ]; then
+        mkdir -p "$OUTPUT_DIR/system/last-upgrade"
+        cp /var/log/pins-upgrade/* "$OUTPUT_DIR/system/last-upgrade/" 2>/dev/null || true
+    fi
 fi
 
 if [ "$INCLUDE_PINS_JOURNAL" -eq 1 ]; then

@@ -181,6 +181,7 @@ class JobManager:
         # Get detailed exit status. Transient units can disappear quickly,
         # so failure to read metadata should not force a failed job result.
         result = "unknown"
+        exit_status_known = False
         show_stdout = b""
         show_stderr = b""
         show_cmd = ["sudo", "-n", "systemctl", "show", "-p", "ExecMainStatus,Result", "--value", unit_name]
@@ -196,6 +197,7 @@ class JobManager:
                 if lines:
                     try:
                         exit_code = int(lines[0])
+                        exit_status_known = True
                     except ValueError:
                         exit_code = 0
                     if len(lines) > 1:
@@ -226,7 +228,9 @@ class JobManager:
             for log in job.logs
         )
 
-        if not is_success and log_success:
+        # The markers only stand in for an exit status systemd could not report;
+        # a known non-zero status (e.g. 20: a PINS package is still pending) wins.
+        if not is_success and log_success and not (exit_status_known and exit_code != 0):
             is_success = True
             job.exit_code = 0  # Explicit success marker from script output.
 
