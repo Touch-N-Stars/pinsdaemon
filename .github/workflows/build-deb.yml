@@ -35,7 +35,14 @@ jobs:
             *) bash -n "$script" ;;
           esac
         done
-        shellcheck scripts/pins-rig-name
+        shellcheck scripts/pins-rig-name scripts/system-upgrade.sh scripts/ensure-required-packages.sh
+
+    - name: APT upgrade integration tests (private dpkg root)
+      run: |
+        # Real apt-get/dpkg transactions on a throwaway root need root
+        # privileges; the host package database is never touched.
+        command -v dpkg-scanpackages >/dev/null || sudo apt-get install -y --no-install-recommends dpkg-dev
+        sudo env "PATH=$PATH" python -m unittest tests/test_system_upgrade_apt.py -v
     
     - name: Set up directory structure
       run: |
@@ -59,6 +66,7 @@ jobs:
         
         # Scripts
         cp scripts/system-upgrade.sh build/usr/local/bin/
+        cp scripts/pins-upgrade-report.py build/usr/local/bin/
         cp scripts/install-firmware.sh build/usr/local/bin/
         cp scripts/install-indi-package.sh build/usr/local/bin/
         cp scripts/install-astap-star-database.sh build/usr/local/bin/
@@ -129,6 +137,9 @@ jobs:
         dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './opt/pinsdaemon/app/wifi_regulatory.py'
         dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './usr/local/bin/manage-swap.py'
         dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -Fq './usr/local/bin/manage-repository.py'
+        dpkg-deb --contents ${{ steps.version.outputs.filename }} | grep -F './usr/local/bin/pins-upgrade-report.py' >/dev/null
+        # Legacy updaters keep back a pinsdaemon that adds Depends/Recommends.
+        if dpkg-deb --field ${{ steps.version.outputs.filename }} Depends Recommends | grep avahi-utils; then exit 1; fi
         
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
