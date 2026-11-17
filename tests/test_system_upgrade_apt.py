@@ -131,6 +131,79 @@ class LegacyRecoveryPathTests(SandboxTestCase):
         self.assertEqual(self.apt.version("avahi-utils"), "0.8-16")
 
 
+class RuntimePackageTriggerTests(SandboxTestCase):
+    """The postinst starts ensure-required-packages.sh while the upgrade still runs."""
+
+    def upgrade_unit_shim(self, active_polls):
+        # systemctl reports a pins-sysupgrade unit as active for the first polls.
+        counter = self.apt.base / "polls"
+        body = f"""
+echo "systemctl $*" >> "$PINS_TEST_CALLS"
+case "$*" in
+  *list-units*pins-sysupgrade-*)
+    n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{counter}"
+    if [ "$n" -le {active_polls} ]; then
+      echo "pins-sysupgrade-x.service loaded active running upgrade"
+      # The upgrade is still running: nothing may have been installed yet.
+      dpkg-query -W -f='${{Status}}' avahi-utils 2>/dev/null | grep -q installed && echo EARLY >> "$PINS_TEST_CALLS"
+    fi ;;
+esac
+exit 0"""
+        shim = self.apt.bin / "systemctl"
+        shim.write_text("#!/bin/sh\n" + body + "\n")
+        shim.chmod(0o755)
+
+    def run_helper(self, **env):
+        merged = dict(self.apt.env, PINS_ENSURE_POLL_SECONDS="0", **env)
+        return subprocess.run(["bash", str(SCRIPTS / "ensure-required-packages.sh")], env=merged,
+                              capture_output=True, text=True, timeout=300)
+
+    def rig_missing_avahi_utils(self):
+        sdk = [("pins-nitecrawlersdk", "1.0"), ("pins-wanderercoversdk", "1.0"),
+               ("pins-wandereretasdk", "1.0"), ("pins-wandererrotatorsdk", "1.0")]
+        for name, version in sdk:
+            self.apt.add_package(name, version)
+        self.rig_with_pinsdaemon(*sdk)
+        self.apt.add_package("avahi-utils", "0.8-16")
+        self.apt.publish(("pinsdaemon", OLD), ("avahi-utils", "0.8-16"), ("linux-image-rpi-v8", KERNEL_OLD), *sdk)
+
+    def test_waits_for_the_running_upgrade_then_installs_avahi_utils(self):
+        self.rig_missing_avahi_utils()
+        self.upgrade_unit_shim(active_polls=3)
+
+        result = self.run_helper()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Waiting for the running system upgrade to finish", result.stdout)
+        self.assertEqual(self.apt.version("avahi-utils"), "0.8-16")
+        self.assertEqual(self.apt.calls().count("list-units"), 4)
+        self.assertNotIn("EARLY", self.apt.calls())
+
+    def test_gives_up_instead_of_waiting_forever(self):
+        self.rig_missing_avahi_utils()
+        self.upgrade_unit_shim(active_polls=1000)
+
+        result = self.run_helper(PINS_ENSURE_UPGRADE_WAIT_SECONDS="0")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("retrying on the next daemon start", result.stderr)
+        self.assertIsNone(self.apt.version("avahi-utils"))
+
+    def test_waits_for_the_pins_package_lock(self):
+        self.rig_missing_avahi_utils()
+        holder = subprocess.Popen(["flock", str(self.apt.lock_file), "sleep", "3"])
+        self.addCleanup(holder.wait)
+        import time
+        time.sleep(0.5)  # the lock is held, as by a legacy updater
+        started = time.monotonic()
+
+        result = self.run_helper(PINS_ENSURE_LOCK_WAIT_SECONDS="60")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreaterEqual(time.monotonic() - started, 2)
+        self.assertEqual(self.apt.version("avahi-utils"), "0.8-16")
+
+
 class NewDependencyTests(SandboxTestCase):
     def test_new_updater_installs_pinsdaemon_with_its_new_dependency(self):
         # Scenarios 2, 3, 4, 5: new dependency, --with-new-pkgs, installed together,

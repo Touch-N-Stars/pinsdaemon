@@ -203,6 +203,11 @@ chmod 644 /etc/NetworkManager/dnsmasq-shared.d/pins-local-only.conf
 chown root:root /etc/systemd/system/sysupdate-api.service
 chmod 644 /etc/systemd/system/sysupdate-api.service
 
+if [ -f "/etc/systemd/system/pins-ensure-required-packages.service" ]; then
+    chown root:root /etc/systemd/system/pins-ensure-required-packages.service
+    chmod 644 /etc/systemd/system/pins-ensure-required-packages.service
+fi
+
 # Ensure Wi-Fi watchdog timer/service files are owned by root
 if [ -f "/etc/systemd/system/pins-wifi-watchdog.service" ]; then
     chown root:root /etc/systemd/system/pins-wifi-watchdog.service
@@ -278,6 +283,15 @@ chown -R sysupdate-api:sysupdate-api /opt/pinsdaemon/venv
 
 # Systemd setup
 systemctl daemon-reload
+
+# Install runtime packages (avahi-utils) now instead of waiting for the next
+# daemon start. They cannot be Depends: updaters that run a plain
+# `apt-get upgrade` would keep this package back. dpkg holds the APT lock until
+# this script returns, so start the helper in its own unit without waiting; it
+# waits for the running upgrade/installation to finish before calling APT.
+if [ -f "/etc/systemd/system/pins-ensure-required-packages.service" ]; then
+    systemctl start --no-block pins-ensure-required-packages.service || true
+fi
 systemctl enable sysupdate-api
 systemctl restart sysupdate-api
 

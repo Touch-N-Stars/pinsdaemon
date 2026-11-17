@@ -20,6 +20,7 @@ LOCK_FILE="${PINS_REPOSITORY_LOCK:-/run/lock/pins-repository.lock}"
 # upgrade to finish instead of racing it for the APT/dpkg locks.
 LOCK_WAIT_SECONDS="${PINS_ENSURE_LOCK_WAIT_SECONDS:-3600}"
 UPGRADE_WAIT_SECONDS="${PINS_ENSURE_UPGRADE_WAIT_SECONDS:-3600}"
+POLL_SECONDS="${PINS_ENSURE_POLL_SECONDS:-5}"
 
 is_installed() {
     dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
@@ -61,8 +62,8 @@ while upgrade_unit_active; do
     if (( waited == 0 )); then
         echo "Waiting for the running system upgrade to finish..."
     fi
-    sleep 5
-    waited=$((waited + 5))
+    sleep "$POLL_SECONDS"
+    waited=$((waited + POLL_SECONDS))
 done
 
 exec 9>"$LOCK_FILE"

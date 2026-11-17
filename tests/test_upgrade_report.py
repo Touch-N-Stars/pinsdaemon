@@ -299,6 +299,21 @@ class PackagingDependencyPolicyTests(unittest.TestCase):
     def test_runtime_packages_cover_avahi_utils(self):
         self.assertIn('"avahi-utils"', (REPO_ROOT / "scripts" / "ensure-required-packages.sh").read_text())
 
+    def test_postinst_starts_the_runtime_package_helper_in_its_own_unit(self):
+        # avahi-utils is installed right after this package, not on a later daemon
+        # start, and a daemon restart cannot interrupt that APT transaction.
+        unit = (REPO_ROOT / "systemd" / "pins-ensure-required-packages.service").read_text()
+        self.assertIn("ExecStart=/usr/local/bin/ensure-required-packages.sh", unit)
+        self.assertIn("Type=oneshot", unit)
+        postinst = (REPO_ROOT / "packaging" / "DEBIAN" / "postinst").read_text()
+        start = postinst.index("systemctl start --no-block pins-ensure-required-packages.service")
+        self.assertLess(postinst.index("systemctl daemon-reload"), start)
+        commands = [line for line in postinst.splitlines() if not line.lstrip().startswith("#")]
+        # dpkg holds the APT lock while postinst runs, so it must never call APT itself.
+        self.assertFalse([line for line in commands if "apt-get" in line or "apt install" in line])
+        workflow = (REPO_ROOT / ".github" / "workflows" / "build-deb.yml").read_text()
+        self.assertIn("cp systemd/pins-ensure-required-packages.service build/etc/systemd/system/", workflow)
+
     def test_build_ships_the_report_helper(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "build-deb.yml").read_text()
         self.assertIn("cp scripts/pins-upgrade-report.py build/usr/local/bin/", workflow)
