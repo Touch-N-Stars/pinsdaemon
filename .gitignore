@@ -5,3 +5,4 @@ venv/
 .env
 .DS_Store
 .vscode/
+app/notify_config.json
